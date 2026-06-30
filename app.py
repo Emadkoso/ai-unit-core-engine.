@@ -46,9 +46,9 @@ def _call_gemini_judge(text: str) -> Optional[Dict[str, float]]:
         
     print(f"ℹ️ Attempting Gemini API call | Key starts with: {api_key[:6]}...", flush=True)
     
-    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={api_key}"
+    base_gemini_url = "https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent"
+    url = f"{base_gemini_url}?key={api_key}"
     
-    # هندسة برومبت صارمة لإجبار النموذج على إرجاع كود جيسون متوافق
     prompt = (
         f"Evaluate text: '{text}'.\n"
         f"Return ONLY a raw JSON object matching this exact schema without any markdown wrapping or backticks:\n"
@@ -68,7 +68,6 @@ def _call_gemini_judge(text: str) -> Optional[Dict[str, float]]:
             result = response.json()
             text_response = result['candidates'][0]['content']['parts'][0]['text'].strip()
             
-            # تنظيف النص برمجياً في حال أضاف الذكاء الاصطناعي علامات الاقتباس الافتراضية للمطورين
             if text_response.startswith("```"):
                 text_response = text_response.replace("```json", "").replace("```", "").strip()
                 
@@ -85,7 +84,12 @@ def setup_telegram_webhook():
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     render_url = os.environ.get("RENDER_EXTERNAL_URL")
     if token and render_url:
-        requests.get(f"[https://api.telegram.org/bot](https://api.telegram.org/bot){token.strip()}/setWebhook?url={render_url.strip()}/tg-webhook")
+        token_clean = token.strip()
+        url_clean = render_url.strip()
+        # عزل الرابط تماماً لحمايته من أخطاء النسخ واللصق للمتصفحات
+        tg_api_url = "[https://api.telegram.org/bot](https://api.telegram.org/bot)"
+        final_webhook_url = f"{tg_api_url}{token_clean}/setWebhook?url={url_clean}/tg-webhook"
+        requests.get(final_webhook_url)
 
 @app.post("/tg-webhook")
 async def telegram_webhook(request: Request):
@@ -109,10 +113,10 @@ async def telegram_webhook(request: Request):
         eval_type = "🤖 حقيقي (Gemini)" if real_eval else "🛡️ دفاعي احتياطي (Local)"
         reply = f"📊 التقرير:\n🔹 نوع التقييم: {eval_type}\n🔹 التقييم: {round(avg_score, 2)}/10\n⏱️ الوقت: {round(t_actual, 3)} ثانية"
         
-        requests.post(f"[https://api.telegram.org/bot](https://api.telegram.org/bot){token}/sendMessage", json={"chat_id": chat_id, "text": reply})
+        tg_send_url = f"[https://api.telegram.org/bot](https://api.telegram.org/bot){token}/sendMessage"
+        requests.post(tg_send_url, json={"chat_id": chat_id, "text": reply})
     return {"status": "ok"}
 
 @app.get("/")
 def home():
     return {"status": "Active"}
-    
