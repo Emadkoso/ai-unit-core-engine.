@@ -46,8 +46,10 @@ def _call_gemini_judge(text: str) -> Optional[Dict[str, float]]:
         
     print(f"ℹ️ Attempting Gemini API call | Key starts with: {api_key[:6]}...", flush=True)
     
-    base_gemini_url = "https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent"
-    url = f"{base_gemini_url}?key={api_key}"
+    # تفكيك الرابط لحمايته من الحافظة المتطورة للهواتف
+    p1 = "ht" + "tps://generative"
+    p2 = "language.googleapis.com/v1/models/gemini-1.5-flash:generateContent"
+    url = f"{p1}{p2}?key={api_key}"
     
     prompt = (
         f"Evaluate text: '{text}'.\n"
@@ -86,9 +88,10 @@ def setup_telegram_webhook():
     if token and render_url:
         token_clean = token.strip()
         url_clean = render_url.strip()
-        # عزل الرابط تماماً لحمايته من أخطاء النسخ واللصق للمتصفحات
-        tg_api_url = "[https://api.telegram.org/bot](https://api.telegram.org/bot)"
-        final_webhook_url = f"{tg_api_url}{token_clean}/setWebhook?url={url_clean}/tg-webhook"
+        
+        # تفكيك الرابط هنا لحمايته بالكامل
+        tg_base = "ht" + "tps://api.te" + "legram.org/bot"
+        final_webhook_url = f"{tg_base}{token_clean}/setWebhook?url={url_clean}/tg-webhook"
         requests.get(final_webhook_url)
 
 @app.post("/tg-webhook")
@@ -113,7 +116,9 @@ async def telegram_webhook(request: Request):
         eval_type = "🤖 حقيقي (Gemini)" if real_eval else "🛡️ دفاعي احتياطي (Local)"
         reply = f"📊 التقرير:\n🔹 نوع التقييم: {eval_type}\n🔹 التقييم: {round(avg_score, 2)}/10\n⏱️ الوقت: {round(t_actual, 3)} ثانية"
         
-        tg_send_url = f"[https://api.telegram.org/bot](https://api.telegram.org/bot){token}/sendMessage"
+        # تفكيك رابط الإرسال أيضاً
+        tg_send_base = "ht" + "tps://api.te" + "legram.org/bot"
+        tg_send_url = f"{tg_send_base}{token}/sendMessage"
         requests.post(tg_send_url, json={"chat_id": chat_id, "text": reply})
     return {"status": "ok"}
 
