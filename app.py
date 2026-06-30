@@ -44,11 +44,12 @@ def _call_gemini_judge(text: str) -> Optional[Dict[str, float]]:
         print("❌ ERROR: GEMINI_API_KEY not found in Environment Variables!", flush=True)
         return None
         
-    print(f"ℹ️ Attempting Gemini API call | Key starts with: {api_key[:6]}...", flush=True)
+    # جلب اسم النموذج مرن؛ الافتراضي تم تحديثه لتفادي الـ 404
+    model_name = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash-latest")
+    print(f"ℹ️ Attempting Gemini API [{model_name}] | Key starts with: {api_key[:6]}...", flush=True)
     
-    # التعديل الجوهري: الانتقال إلى إصدار v1beta المتوافق مع المفاتيح والمشاريع الجديدة
     p1 = "ht" + "tps://generative"
-    p2 = "language.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+    p2 = f"language.googleapis.com/v1beta/models/{model_name}:generateContent"
     url = f"{p1}{p2}?key={api_key}"
     
     prompt = (
