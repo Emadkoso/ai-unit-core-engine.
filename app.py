@@ -37,22 +37,36 @@ def _call_groq_judge(text: str) -> Optional[Dict[str, float]]:
         "Content-Type": "application/json"
     }
     
-    prompt = (
-        f"Evaluate text: '{text}'.\n"
-        f"Return ONLY a raw JSON object matching this exact schema without any markdown wrapping or backticks:\n"
-        f"{{\n"
-        f"  \"accuracy\": 8.0,\n"
-        f"  \"clarity\": 8.0,\n"
-        f"  \"creativity\": 8.0,\n"
-        f"  \"conciseness\": 8.0\n"
-        f"}}"
+    # دليل المحلفين الصارم لإجبار الذكاء الاصطناعي على النقد الحقيقي والتأثر بجودة النص
+    system_instruction = (
+        "You are an elite expert linguistic judge in an advanced AI Jury system. "
+        "Your task is to critically and strictly evaluate the provided text across 4 core metrics. "
+        "Do not default to medium scores (like 8.0) unless truly deserved. "
+        "Be extremely penalizing toward brief, incomplete, casual, or low-effort queries (e.g., short phrases, basic conversational fillers, single words). "
+        "Give them very low scores (1.0 to 4.0) in clarity, creativity, or accuracy where applicable, because they lack context or intellectual value. "
+        "Only grant high scores (8.0 to 10.0) to complete, deeply thought-out, well-structured, or highly creative paragraphs.\n\n"
+        "Metrics Definition:\n"
+        "1. accuracy: Grammatical and semantic structural correctness.\n"
+        "2. clarity: How well the meaning/intent is fully communicated without missing context.\n"
+        "3. creativity: Uniqueness, vocabulary richness, and thought complexity.\n"
+        "4. conciseness: Delivering maximum informational value in the least words (short casual text is NOT concise, it is just empty).\n\n"
+        "You MUST output ONLY a valid raw JSON object matching the exact format shown below, with no thinking, no explanation, and no markdown wrapping/backticks:\n"
+        "{\n"
+        "  \"accuracy\": 0.0,\n"
+        "  \"clarity\": 0.0,\n"
+        "  \"creativity\": 0.0,\n"
+        "  \"conciseness\": 0.0\n"
+        "}"
     )
     
     payload = {
         "model": "llama-3.1-8b-instant",
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": [
+            {"role": "system", "content": system_instruction},
+            {"role": "user", "content": f"Evaluate this text string strictly: '{text}'"}
+        ],
         "response_format": {"type": "json_object"},
-        "temperature": 0.2
+        "temperature": 0.1  # تقليل العشوائية لزيادة الالتزام بالقواعد اللغوية
     }
     
     try:
@@ -88,7 +102,6 @@ async def telegram_webhook(request: Request):
         token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
         
         start_time = time.time()
-        # استدعاء المحلف الأول النشط (Llama 3)
         scores = _call_groq_judge(user_text)
         real_eval = True
         
@@ -100,7 +113,17 @@ async def telegram_webhook(request: Request):
         avg_score = sum(scores.values()) / len(scores)
         
         eval_type = "🤖 حقيقي (المحلف 1: Llama 3)" if real_eval else "🛡️ defensive احتياطي (Local)"
-        reply = f"📊 التقرير:\n🔹 نوع التقييم: {eval_type}\n🔹 التقييم: {round(avg_score, 2)}/10\n⏱️ الوقت: {round(t_actual, 3)} ثانية"
+        reply = (
+            f"📊 التقرير المطور:\n"
+            f"🔹 نوع التقييم: {eval_type}\n"
+            f"🎯 التقييم الإجمالي: {round(avg_score, 2)}/10\n"
+            f"📋 التفاصيل:\n"
+            f"  ▫️ الدقة: {scores.get('accuracy', 0)}/10\n"
+            f"  ▫️ الوضوح: {scores.get('clarity', 0)}/10\n"
+            f"  ▫️ الإبداع: {scores.get('creativity', 0)}/10\n"
+            f"  ▫️ الإيجاز: {scores.get('conciseness', 0)}/10\n"
+            f"⏱️ الوقت: {round(t_actual, 3)} ثانية"
+        )
         
         tg_send_base = "https://api.telegram.org/bot"
         tg_send_url = f"{tg_send_base}{token}/sendMessage"
