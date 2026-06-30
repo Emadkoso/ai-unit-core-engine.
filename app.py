@@ -64,24 +64,26 @@ def _call_gemini_judge(text: str) -> Optional[Dict[str, float]]:
         pass
     return None
 
-# --- ربط تليجرام التلقائي (Webhook Auto-Setup) ---
 @app.on_event("startup")
 def setup_telegram_webhook():
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    render_url = os.environ.get("RENDER_EXTERNAL_URL") # موقع ريندر يوفر هذا الرابط تلقائياً للسيرفر
+    render_url = os.environ.get("RENDER_EXTERNAL_URL")
     if token and render_url:
         webhook_url = f"{render_url}/tg-webhook"
         requests.get(f"https://api.telegram.org/bot{token}/setWebhook?url={webhook_url}")
 
-# --- نقطة استقبال رسائل تليجرام ---
+# --- نقطة استقبال رسايل تليجرام المكشوفة للفحص ---
 @app.post("/tg-webhook")
 async def telegram_webhook(request: Request):
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     if not token:
-        return {"status": "ignored"}
+        print("❌ ERROR: TELEGRAM_BOT_TOKEN missing in Environment Variables!", flush=True)
+        return {"status": "ok"}
         
     try:
         data = await request.json()
+        print(f"📥 Received Payload: {data}", flush=True)
+        
         if "message" in data and "text" in data["message"]:
             chat_id = data["message"]["chat"]["id"]
             user_text = data["message"]["text"]
@@ -89,7 +91,6 @@ async def telegram_webhook(request: Request):
             if user_text.startswith("/start"):
                 reply = "👋 أهلاً بك في محرك AI-Unit المعماري الحركي!\n\nأرسل لي الآن أي نص قام بتوليده الذكاء الاصطناعي، وسأقوم بفحصه وتقييمه أونلاين عبر سيرفرك السحابي فوراً وتطبيق المعادلات الرياضية الحركية لتحديد كفاءته!"
             else:
-                # محاكاة فحص النص المرسل من المستخدم كمهمة مستوى 2
                 start_time = time.time()
                 scores = _call_gemini_judge(user_text)
                 real_eval = True
@@ -106,19 +107,23 @@ async def telegram_webhook(request: Request):
                 
                 eval_type = "🤖 حقيقي (Gemini)" if real_eval else "🛡️ دفاعي احتياطي (Local)"
                 reply = (
-                    f"📊 **تقرير فحص جودة النص:**\n\n"
-                    f"🔹 **نوع التقييم:** {eval_type}\n"
-                    f"🔹 **متوسط جودة النص:** {round(consensus_avg, 2)} / 10\n"
-                    f"⏱️ **زمن استجابة السيرفر:** {round(t_actual, 3)} ثانية\n"
-                    f"📈 **معامل السرعة الحركي:** {round(s_k, 4)}\n"
-                    f"🏅 **رصيد الـ AI-Unit المحسوب:** `{round(final_score, 4)}` نقطة\n\n"
-                    f"⚙️ *تم الفحص والمعالجة بالكامل عبر خادمك السحابي بنجاح.*"
+                    f"📊 تقرير فحص جودة النص:\n\n"
+                    f"🔹 نوع التقييم: {eval_type}\n"
+                    f"🔹 متوسط جودة النص: {round(consensus_avg, 2)} / 10\n"
+                    f"⏱️ زمن استجابة السيرفر: {round(t_actual, 3)} ثانية\n"
+                    f"📈 معامل السرعة الحركي: {round(s_k, 4)}\n"
+                    f"🏅 رصيد الـ AI-Unit المحسوب: {round(final_score, 4)} نقطة\n\n"
+                    f"⚙️ تم الفحص والمعالجة بالكامل عبر خادمك السحابي بنجاح."
                 )
                 
-            # إرسال الرد للمستخدم في تليجرام
-            requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json={"chat_id": chat_id, "text": reply, "parse_mode": "Markdown"})
-    except Exception:
-        pass
+            # إرسال الرد ومراقبة استجابة تليجرام
+            tg_url = f"https://api.telegram.org/bot{token}/sendMessage"
+            tg_res = requests.post(tg_url, json={"chat_id": chat_id, "text": reply})
+            print(f"📤 Telegram Sending Status: {tg_res.status_code} | Response: {tg_res.text}", flush=True)
+            
+    except Exception as e:
+        print(f"❌ CRITICAL ERROR INSIDE WEBHOOK: {str(e)}", flush=True)
+        
     return {"status": "ok"}
 
 @app.get("/")
