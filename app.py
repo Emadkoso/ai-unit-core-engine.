@@ -46,7 +46,8 @@ def _call_gemini_judge(text: str) -> Optional[Dict[str, float]]:
         
     print(f"ℹ️ Attempting Gemini API call | Key starts with: {api_key[:6]}...", flush=True)
     
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+    # تم التحديث هنا إلى الإصدار المستقر v1 بدلاً من v1beta
+    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={api_key}"
     prompt = f"Evaluate text: '{text}'. Return ONLY JSON: {{\"accuracy\": 8.0, \"clarity\": 8.0, \"creativity\": 8.0, \"conciseness\": 8.0}}"
     payload = {"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"responseMimeType": "application/json"}}
     
@@ -90,7 +91,7 @@ async def telegram_webhook(request: Request):
         avg_score = sum(scores.values()) / len(scores)
         
         eval_type = "🤖 حقيقي (Gemini)" if real_eval else "🛡️ دفاعي احتياطي (Local)"
-        reply = f"📊 التقرير:\n🔹 {eval_type}\n🔹 التقييم: {round(avg_score, 2)}/10\n⏱️ الوقت: {round(t_actual, 3)} ثانية"
+        reply = f"📊 التقرير:\n🔹 نوع التقييم: {eval_type}\n🔹 التقييم: {round(avg_score, 2)}/10\n⏱️ الوقت: {round(t_actual, 3)} ثانية"
         
         requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json={"chat_id": chat_id, "text": reply})
     return {"status": "ok"}
@@ -98,3 +99,4 @@ async def telegram_webhook(request: Request):
 @app.get("/")
 def home():
     return {"status": "Active"}
+    
