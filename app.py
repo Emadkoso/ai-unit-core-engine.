@@ -1,13 +1,11 @@
 # ==============================================================
-# AI-Unit Core Engine — بوت تيليجرام (V8.0)
+# AI-Unit Core Engine — بوت تيليجرام (V8.0 - Optimized)
 # الملف: app.py
 # ==============================================================
-# الميزات الجديدة:
-#   • تقدير الصعوبة (k) بواسطة الذكاء الاصطناعي (llama-3.1-8b)
-#   • معادلة W_k = e^k (وزن أسّي)
-#   • معايير التقييم تتكاثر أسّياً: العدد = 2^(k-1) (1، 2، 4، 8، 16)
-#   • تجميع النتيجة النهائية: (درجة)^k × الوزن، ثم × S_k
-#   • FastAPI + Webhook تلغرام + واجهة برمجية (API)
+# الميزات الجديدة المدمجة:
+#   • زيادة الـ max_tokens للمحلّف إلى 1000 لمنع انقطاع الـ JSON في k=5
+#   • رفع الـ timeout للنموذج المختبر إلى 40 ثانية للمهام البرمجية المعقدة
+#   • تنسيق رقم النتيجة النهائية بجمالية احترافية لسهولة القراءة
 # ==============================================================
 
 from fastapi import FastAPI, Request
@@ -18,7 +16,7 @@ import math
 import os
 import re
 import requests
-from typing import Dict, Optional, List, Any
+from typing import Dict, Optional, List, Any, Tuple
 
 # ---------- الإعدادات العامة ----------
 app = FastAPI(title="AI-Unit Core Engine", version="8.0")
@@ -48,7 +46,7 @@ MASTER_CRITERIA = [
     # k=4 (ثمانية معايير)
     {"name": "depth", "desc": "هل تجاوز السطح إلى الأسباب الجذرية والتحليل العميق؟", "weight": "exp"},
     {"name": "uniqueness", "desc": "هل يقدم وجهة نظر نادرة أو غير مكررة؟", "weight": "semi_exp"},
-    {"name": "creativity", "desc": "هل يقدم حلولاً مبتكرة أو زوايا جديدة؟", "weight": "semi_exp"},
+    {"name": "creativity", "desc": "هل يقدم حلولاً مبتكرة أو زوايا جديدة？", "weight": "semi_exp"},
     {"name": "safety", "desc": "هل يتجنب التحيز، الكراهية، أو الضرر؟", "weight": "linear"},
     # k=5 (ستة عشر معياراً – الانفجار الكامل)
     {"name": "strategy", "desc": "هل يقدم خطة عمل قابلة للتنفيذ استراتيجياً؟", "weight": "exp"},
@@ -181,11 +179,13 @@ def calculate_s_k(k: int, t_actual: float) -> float:
 def call_tested_model(prompt: str) -> Tuple[Optional[str], float]:
     """يستدعي النموذج المختبَر ويعيد (الرد, الزمن الفعلي)."""
     start = time.time()
+    # التعديل الثاني: رفع مهلة الانتظار إلى 40 ثانية لضمان استقرار الاستجابات الطويلة
     response = _groq_call(
         messages=[{"role": "user", "content": prompt}],
         model=TESTED_MODEL,
         temperature=0.7,
-        max_tokens=600
+        max_tokens=600,
+        timeout=40
     )
     return response, time.time() - start
 
@@ -225,11 +225,12 @@ def call_jury_exponential(model_response: str, k: int) -> Dict:
         f"RESPONSE TO EVALUATE:\n\"\"\"\n{model_response}\n\"\"\""
     )
 
+    # التعديل الأول: رفع الـ max_tokens إلى 1000 لمنع انقطاع مخرجات الـ JSON الطويلة في المستويات العالية
     raw = _groq_call(
         messages=[{"role": "user", "content": jury_prompt}],
         model=JURY_MODEL,
         temperature=0.1,
-        max_tokens=500,
+        max_tokens=1000,
         json_mode=True,
         timeout=20
     )
@@ -384,6 +385,7 @@ async def telegram_webhook(request: Request):
         f"  • {name}: {score:.1f}/10" for name, score in s.items()
     ])
 
+    # التعديل الثالث: إضافة فواصل الآلاف وتثبيت خانتين عشريتين لتنسيق النتيجة النهائية الفلكية بجمالية فائقة
     reply = (
         f"🏆 *AI-Unit Core Engine V8.0*\n"
         f"——————————————————\n"
@@ -396,7 +398,7 @@ async def telegram_webhook(request: Request):
         f"  • W_k = e^{result['k']} = {result['w_k']}\n"
         f"  • S_k = {result['s_k']}\n"
         f"  • المجموع الموزون = {result['total_weighted_sum']}\n\n"
-        f"🏅 *النتيجة النهائية:* `{result['ai_unit_score']} AIU`\n"
+        f"🏅 *النتيجة النهائية:* `{result['ai_unit_score']:,.2f} AIU`\n"
         f"⏱️ زمن الاستجابة: {result['t_actual']} ث\n"
         f"——————————————————\n"
         f"⚖️ المحلِّف: {jury_real}"
@@ -429,7 +431,7 @@ async def health():
     }
 
 # ==============================================================
-# تشغيل السيرفر (عند استدعاء uvicorn main:app --host 0.0.0.0 --port $PORT)
+# تشغيل السيرفر محلياً أو عبر البيئة السحابية
 # ==============================================================
 if __name__ == "__main__":
     import uvicorn
