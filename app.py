@@ -1,11 +1,13 @@
 # ==============================================================
-# AI-Unit Core Engine — بوت تيليجرام (V8.0 - Optimized)
+# AI-Unit Core Engine — بوت تيليجرام (V8.5 - Hybrid Edition)
 # الملف: app.py
 # ==============================================================
-# الميزات الجديدة المدمجة:
-#   • زيادة الـ max_tokens للمحلّف إلى 1000 لمنع انقطاع الـ JSON في k=5
-#   • رفع الـ timeout للنموذج المختبر إلى 40 ثانية للمهام البرمجية المعقدة
-#   • تنسيق رقم النتيجة النهائية بجمالية احترافية لسهولة القراءة
+# المعمارية المتقدمة المدمجة:
+#   • تقدير الصعوبة (k) ذكياً بواسطة الذكاء الاصطناعي (1-5).
+#   • نظام المحلّف الهجين (Hybrid Jury): Groq للمستويات السهلة والمتوسطة (k <= 3)،
+#     ويترقى تلقائياً إلى OpenRouter (Claude-3.5) للمهمات المعقدة (k >= 4).
+#   • معالجة حذرة ومقاومة للانقطاع: max_tokens=1000 للمحلّف، وtimeout=40 للنموذج المختبر.
+#   • تنسيق رقمي فخم للنتيجة النهائية لسهولة القراءة في تلغرام.
 # ==============================================================
 
 from fastapi import FastAPI, Request
@@ -19,13 +21,16 @@ import requests
 from typing import Dict, Optional, List, Any, Tuple
 
 # ---------- الإعدادات العامة ----------
-app = FastAPI(title="AI-Unit Core Engine", version="8.0")
+app = FastAPI(title="AI-Unit Core Engine", version="8.5")
 
-TESTED_MODEL = "llama-3.3-70b-versatile"   # النموذج المختبر
-JURY_MODEL   = "llama-3.1-8b-instant"      # النموذج المحلِّف (لتقدير k والتقييم)
-GROQ_URL     = "https://api.groq.com/openai/v1/chat/completions"
+TESTED_MODEL     = "llama-3.3-70b-versatile"   # النموذج المختبر (عبر Groq)
+JURY_MODEL       = "llama-3.1-8b-instant"      # المحلّف القياسي للمهمات العادية (عبر Groq)
+SUPER_JURY_MODEL = "anthropic/claude-3.5-sonnet" # المحلّف الخارق للمهمات المعقدة (عبر OpenRouter)
 
-# أوقات السوق القيادية (للحصول على S_k)
+GROQ_URL       = "https://api.groq.com/openai/v1/chat/completions"
+OPENROUTER_URL = "https://api.openrouter.ai/v1/chat/completions"
+
+# أوقات السوق القياسية (للحصول على عامل السرعة S_k)
 MARKET_LEADER_RUNTIMES: Dict[int, list] = {
     1: [0.10, 0.14, 0.12],
     2: [0.35, 0.42, 0.38],
@@ -46,13 +51,13 @@ MASTER_CRITERIA = [
     # k=4 (ثمانية معايير)
     {"name": "depth", "desc": "هل تجاوز السطح إلى الأسباب الجذرية والتحليل العميق؟", "weight": "exp"},
     {"name": "uniqueness", "desc": "هل يقدم وجهة نظر نادرة أو غير مكررة؟", "weight": "semi_exp"},
-    {"name": "creativity", "desc": "هل يقدم حلولاً مبتكرة أو زوايا جديدة？", "weight": "semi_exp"},
+    {"name": "creativity", "desc": "هل يقدم حلولاً مبتكرة أو زوايا جديدة؟", "weight": "semi_exp"},
     {"name": "safety", "desc": "هل يتجنب التحيز، الكراهية، أو الضرر؟", "weight": "linear"},
     # k=5 (ستة عشر معياراً – الانفجار الكامل)
     {"name": "strategy", "desc": "هل يقدم خطة عمل قابلة للتنفيذ استراتيجياً؟", "weight": "exp"},
     {"name": "predictive_power", "desc": "هل يتنبأ بالنتائج أو التحديات المستقبلية بدقة؟", "weight": "semi_exp"},
     {"name": "critical_analysis", "desc": "هل حلل الفرضيات ونقدها بناءً على أدلة؟", "weight": "semi_exp"},
-    {"name": "originality", "desc": "هل الإجابة جديدة كلياً وغير موجودة في النماذج الأخرى؟", "weight": "semi_exp"},
+    {"name": "originality", "desc": "هل الإجابة جديدة كلياً وغير موجودة في النماذج الأخرى？", "weight": "semi_exp"},
     {"name": "fallacy_detection", "desc": "هل اكتشف المغالطات المنطقية في السؤال نفسه؟", "weight": "exp"},
     {"name": "rhetorical_beauty", "desc": "هل الصياغة لغوياً بليغة ومؤثرة؟", "weight": "linear"},
     {"name": "adaptability", "desc": "هل يتكيف الجواب مع سياقات أو جماهير مختلفة؟", "weight": "linear"},
@@ -60,7 +65,7 @@ MASTER_CRITERIA = [
 ]
 
 
-# ---------- 1. استدعاء Groq (مشترك) ----------
+# ---------- 1. دوال استدعاء واجهات البرمجة (APIs) ----------
 def _groq_call(
     messages: list,
     model: str,
@@ -89,23 +94,52 @@ def _groq_call(
         resp = requests.post(GROQ_URL, json=payload, headers=headers, timeout=timeout)
         resp.raise_for_status()
         return resp.json()["choices"][0]["message"]["content"]
-    except requests.exceptions.Timeout:
-        print(f"❌ Groq timeout {timeout}s (model={model})")
-        return None
-    except requests.exceptions.HTTPError:
-        print(f"❌ Groq HTTP {resp.status_code}: {resp.text[:200]}")
-        return None
-    except (KeyError, json.JSONDecodeError) as e:
-        print(f"❌ تعذّر تحليل رد Groq: {e}")
-        return None
     except Exception as e:
-        print(f"❌ خطأ غير متوقع: {e}")
+        print(f"❌ خطأ استدعاء Groq ({model}): {e}")
+        return None
+
+
+def _openrouter_call(
+    messages: list,
+    model: str,
+    temperature: float = 0.7,
+    max_tokens: int = 600,
+    json_mode: bool = False,
+    timeout: int = 30
+) -> Optional[str]:
+    """إرسال طلب إلى OpenRouter API وإرجاع النص."""
+    api_key = os.environ.get("OPENROUTER_API_KEY")
+    if not api_key:
+        print("❌ OPENROUTER_API_KEY غير موجود")
+        return None
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://ai-unit.engine",
+        "X-Title": "AI-Unit Core Engine"
+    }
+    payload: Dict = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens
+    }
+    if json_mode:
+        payload["response_format"] = {"type": "json_object"}
+
+    try:
+        resp = requests.post(OPENROUTER_URL, json=payload, headers=headers, timeout=timeout)
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"]
+    except Exception as e:
+        print(f"❌ خطأ استدعاء OpenRouter ({model}): {e}")
         return None
 
 
 # ---------- 2. تقدير الصعوبة (k) بواسطة الذكاء الاصطناعي ----------
 def _difficulty_fallback(text: str) -> int:
-    """احتياطي بسيط (يُستخدم فقط عند فشل الذكاء الاصطناعي)."""
+    """احتياطي بسيط في حال فشل الذكاء الاصطناعي."""
     n = len(text)
     if n > 500: return 5
     if n > 300: return 4
@@ -114,10 +148,7 @@ def _difficulty_fallback(text: str) -> int:
     return 1
 
 def assess_difficulty(prompt: str) -> Tuple[int, str, bool]:
-    """
-    يُقرر الذكاء الاصطناعي k من 1 إلى 5 بناءً على الصعوبة المعرفية الفعلية.
-    يعيد: (k, السبب, هل الحكم من الذكاء الاصطناعي؟)
-    """
+    """يُقرر الذكاء الاصطناعي قيمة k من 1 إلى 5 بناءً على الصعوبة المعرفية الفعلية."""
     difficulty_prompt = (
         "You are an AI difficulty assessor for an LLM benchmarking system.\n"
         "Rate the COGNITIVE difficulty of the following prompt from 1 to 5.\n\n"
@@ -153,14 +184,12 @@ def assess_difficulty(prompt: str) -> Tuple[int, str, bool]:
             k = int(data["k"])
             reason = str(data.get("reason", "")).strip()
             if k not in range(1, 6):
-                raise ValueError(f"k={k} خارج 1-5")
+                raise ValueError(f"k={k} خارج النطاق")
             return k, reason, True
         except (KeyError, ValueError, json.JSONDecodeError):
             continue
 
-    # لم يُعثر على JSON صالح
     k = _difficulty_fallback(prompt)
-    print(f"⚠️ فشل تحليل JSON من تقدير الصعوبة: {raw[:100]}")
     return k, "تقدير احتياطي — JSON غير صالح", False
 
 
@@ -177,9 +206,8 @@ def calculate_s_k(k: int, t_actual: float) -> float:
 
 # ---------- 4. استدعاء النموذج المختبَر ----------
 def call_tested_model(prompt: str) -> Tuple[Optional[str], float]:
-    """يستدعي النموذج المختبَر ويعيد (الرد, الزمن الفعلي)."""
+    """يستدعي النموذج المختبَر ويعيد (الرد, الزمن الفعلي) مع مهلة 40 ثانية للمهام الطويلة."""
     start = time.time()
-    # التعديل الثاني: رفع مهلة الانتظار إلى 40 ثانية لضمان استقرار الاستجابات الطويلة
     response = _groq_call(
         messages=[{"role": "user", "content": prompt}],
         model=TESTED_MODEL,
@@ -190,27 +218,27 @@ def call_tested_model(prompt: str) -> Tuple[Optional[str], float]:
     return response, time.time() - start
 
 
-# ---------- 5. هيئة المحلفين – التكاثر الأسّي للمعايير ----------
+# ---------- 5. هيئة المحلفين الهجينة (Dynamic Routing) ----------
 def get_criteria_for_k(k: int) -> List[Dict]:
-    """عدد المعايير = 2^(k-1)، نأخذ أول N من MASTER_CRITERIA."""
+    """عدد المعايير = 2^(k-1)"""
     k = max(1, min(k, 5))
     count = 2 ** (k - 1)
     return MASTER_CRITERIA[:count]
 
 def get_criterion_weight(criterion: Dict, k: int) -> float:
-    """ترجيح أسّي أو خطي حسب نوع المعيار."""
+    """ترجيح المعيار حسب نوعه هندسياً."""
     w_type = criterion["weight"]
     if w_type == "exp":
         return math.e ** k
     elif w_type == "semi_exp":
         return math.e ** (k / 2)
-    else:  # linear
+    else:
         return float(k)
 
 def call_jury_exponential(model_response: str, k: int) -> Dict:
     """
-    المحلِّف يُقيّم الرد بناءً على المعايير المتضاعفة أسّياً.
-    يُرسل جميع المعايير دفعة واحدة في برومت واحد.
+    المحلِّف الذكي: يوجه الطلب لـ Groq سريجاً إذا كان k <= 3،
+    ويستدعي محلفاً خارقاً (Claude) عبر OpenRouter إذا كان k >= 4 مع رفع الـ max_tokens لـ 1000.
     """
     criteria = get_criteria_for_k(k)
     criteria_names = [c["name"] for c in criteria]
@@ -225,85 +253,86 @@ def call_jury_exponential(model_response: str, k: int) -> Dict:
         f"RESPONSE TO EVALUATE:\n\"\"\"\n{model_response}\n\"\"\""
     )
 
-    # التعديل الأول: رفع الـ max_tokens إلى 1000 لمنع انقطاع مخرجات الـ JSON الطويلة في المستويات العالية
-    raw = _groq_call(
-        messages=[{"role": "user", "content": jury_prompt}],
-        model=JURY_MODEL,
-        temperature=0.1,
-        max_tokens=1000,
-        json_mode=True,
-        timeout=20
-    )
+    # التوجيه الذكي للمحلّف (Dynamic Routing)
+    if k >= 4:
+        active_jury = SUPER_JURY_MODEL
+        raw = _openrouter_call(
+            messages=[{"role": "user", "content": jury_prompt}],
+            model=SUPER_JURY_MODEL,
+            temperature=0.1,
+            max_tokens=1000,
+            json_mode=True,
+            timeout=30
+        )
+    else:
+        active_jury = JURY_MODEL
+        raw = _groq_call(
+            messages=[{"role": "user", "content": jury_prompt}],
+            model=JURY_MODEL,
+            temperature=0.1,
+            max_tokens=1000,
+            json_mode=True,
+            timeout=20
+        )
 
     if raw is None:
-        # احتياطي قاسٍ: جميع الدرجات = 1.0 (عقاب شديد)
         return {"scores": {c["name"]: 1.0 for c in criteria},
                 "is_real": False,
-                "error": "فشل استدعاء المحلِّف"}
+                "error": "فشل استدعاء المحلِّف",
+                "jury_used": active_jury}
 
     try:
-        # استخراج JSON من الرد (قد يحتوي على فاصلة أو علامات)
         json_start = raw.find('{')
         json_end = raw.rfind('}') + 1
         if json_start == -1 or json_end == -1:
             raise ValueError("لم يُعثر على JSON")
         json_str = raw[json_start:json_end]
         scores = json.loads(json_str)
-        # التأكد من وجود جميع المفاتيح بالقيم المناسبة
+        
         final_scores = {}
         for c in criteria:
             name = c["name"]
             val = scores.get(name)
-            if val is None:
-                val = 1.0
+            if val is None: val = 1.0
             try:
                 val = float(val)
             except (TypeError, ValueError):
                 val = 1.0
             final_scores[name] = min(max(val, 0.0), 10.0)
-        return {"scores": final_scores, "is_real": True, "error": None}
-    except (json.JSONDecodeError, ValueError, TypeError) as e:
-        print(f"⚠️ فشل تحليل JSON من المحلِّف: {e} | raw: {raw[:200]}")
+        return {"scores": final_scores, "is_real": True, "error": None, "jury_used": active_jury}
+    except Exception as e:
+        print(f"⚠️ فشل تحليل مخرجات المحلّف: {e}")
         return {"scores": {c["name"]: 1.0 for c in criteria},
                 "is_real": False,
-                "error": f"JSON غير صالح: {str(e)}"}
+                "error": f"JSON غير صالح: {str(e)}",
+                "jury_used": active_jury}
 
 
 # ---------- 6. خط الإنتاج الرئيسي (Master Pipeline) ----------
 def run_ai_unit(prompt: str) -> Dict[str, Any]:
-    """
-    التسلسل الكامل:
-      أ. تقدير k بواسطة الذكاء الاصطناعي
-      ب. استدعاء النموذج المختبَر (قياس الزمن)
-      ج. المحلِّف يُقيّم باستخدام المعايير المتضاعفة أسّياً
-      د. حساب النتيجة النهائية: Σ (Score_i^k × Weight_i) × S_k
-    """
-    # أ. تقدير الصعوبة
+    """تنسيق دورة معالجة البيانات وتقييم المعادلة بالكامل."""
+    # أ. تقدير الصعوبة k
     k, k_reason, k_is_real = assess_difficulty(prompt)
     w_k = calculate_w_k(k)
 
     # ب. استدعاء النموذج المختبَر
     model_response, t_actual = call_tested_model(prompt)
     if model_response is None:
-        return {"success": False,
-                "error": "فشل استدعاء النموذج المختبَر — تحقق من GROQ_API_KEY"}
+        return {"success": False, "error": "فشل استدعاء النموذج المختبَر — تحقق من مفاتيح الربط"}
 
-    # ج. المحلِّف (معايير متضاعفة)
+    # ج. استدعاء المحلّف الموجه ديناميكياً
     jury = call_jury_exponential(model_response, k)
     scores = jury["scores"]
-    # حساب متوسط الدرجات (لأغراض العرض)
+    active_jury_model = jury["jury_used"]
     avg_score = sum(scores.values()) / len(scores) if scores else 0.0
 
-    # د. تجميع النتيجة باستخدام التكاثر الأسّي
+    # د. حساب النتيجة الكلية بالتكاثر الأسّي للمؤشرات
     total_weighted_score = 0.0
     criterion_details = []
     for name, score in scores.items():
-        # العثور على تعريف المعيار من القائمة الأم
         criterion_data = next((c for c in MASTER_CRITERIA if c["name"] == name), None)
-        if criterion_data:
-            weight = get_criterion_weight(criterion_data, k)
-        else:
-            weight = 1.0
+        weight = get_criterion_weight(criterion_data, k) if criterion_data else 1.0
+        
         # (درجة)^k × الوزن
         contribution = (score ** k) * weight
         total_weighted_score += contribution
@@ -314,26 +343,22 @@ def run_ai_unit(prompt: str) -> Dict[str, Any]:
             "contribution": round(contribution, 4)
         })
 
-    # هـ. تطبيق عامل السرعة
+    # هـ. تطبيق عامل السرعة وعامل الجودة النسبي
     s_k = calculate_s_k(k, t_actual)
-    a_k = avg_score / 10.0  # نستخدم متوسط الدرجات المعياري (0-1) لتقريب A_k
+    a_k = avg_score / 10.0
     ai_unit_score = total_weighted_score * s_k
 
     return {
         "success": True,
         "model_tested": TESTED_MODEL,
-        "jury_model": JURY_MODEL,
-        # تقدير الصعوبة
+        "jury_model": active_jury_model,
         "k": k,
         "k_reason": k_reason,
         "k_assessed_by_ai": k_is_real,
-        # المعايير والقيم
         "criteria_count": len(scores),
-        "criteria_names": list(scores.keys()),
         "scores": scores,
         "avg_score": round(avg_score, 2),
         "a_k": round(a_k, 4),
-        # المعادلة
         "w_k": round(w_k, 4),
         "s_k": round(s_k, 4),
         "total_weighted_sum": round(total_weighted_score, 4),
@@ -346,7 +371,7 @@ def run_ai_unit(prompt: str) -> Dict[str, Any]:
     }
 
 
-# ---------- 7. Telegram Webhook ----------
+# ---------- 7. Telegram Webhook Endpoint ----------
 def _send_tg(token: str, chat_id: int, text: str) -> None:
     try:
         requests.post(
@@ -368,7 +393,7 @@ async def telegram_webhook(request: Request):
     user_text = data["message"]["text"].strip()
     token     = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 
-    _send_tg(token, chat_id, "⏳ جارٍ التقييم باستخدام AI‑Unit V8.0 ...")
+    _send_tg(token, chat_id, "⏳ جاري التقييم الشامل وضخ البيانات عبر خط المعالجة الهجين...")
 
     result = run_ai_unit(user_text)
 
@@ -377,62 +402,56 @@ async def telegram_webhook(request: Request):
         return {"status": "ok"}
 
     s = result["scores"]
-    jury_real = "✅" if result["jury_is_real"] else "⚠️ احتياطي"
-    k_real    = "🧠 ذكاء اصطناعي" if result["k_assessed_by_ai"] else "⚠️ احتياطي"
+    jury_status = "✅" if result["jury_is_real"] else "⚠️ احتياطي (فشل الهيكل الرئيسي)"
+    k_status    = "🧠 ذكاء اصطناعي" if result["k_assessed_by_ai"] else "⚠️ احتياطي السلسلة"
 
-    # بناء الرد المُفصّل
-    criteria_lines = "\n".join([
-        f"  • {name}: {score:.1f}/10" for name, score in s.items()
-    ])
+    criteria_lines = "\n".join([f"  • {name}: {score:.1f}/10" for name, score in s.items()])
 
-    # التعديل الثالث: إضافة فواصل الآلاف وتثبيت خانتين عشريتين لتنسيق النتيجة النهائية الفلكية بجمالية فائقة
+    # بناء الرد مع تطبيق التنسيق الاحترافي للآلاف والمستند الرقمي المطور
     reply = (
-        f"🏆 *AI-Unit Core Engine V8.0*\n"
+        f"🏆 *AI-Unit Core Engine V8.5*\n"
         f"——————————————————\n"
-        f"🤖 النموذج: `{result['model_tested']}`\n\n"
-        f"🎯 *مستوى الصعوبة:* k={result['k']} ({k_real})\n"
-        f"💬 السبب: _{result['k_reason']}_\n\n"
-        f"📊 *عدد المعايير المتضاعفة:* {result['criteria_count']} (2^({result['k']-1}))\n"
-        f"📋 *تفاصيل التقييم:*\n{criteria_lines}\n\n"
-        f"📐 *المعادلة:* `W_k × S_k × Σ(Score_i^k × Weight_i)`\n"
-        f"  • W_k = e^{result['k']} = {result['w_k']}\n"
-        f"  • S_k = {result['s_k']}\n"
-        f"  • المجموع الموزون = {result['total_weighted_sum']}\n\n"
-        f"🏅 *النتيجة النهائية:* `{result['ai_unit_score']:,.2f} AIU`\n"
-        f"⏱️ زمن الاستجابة: {result['t_actual']} ث\n"
+        f"🤖 النموذج المختبَر: `{result['model_tested']}`\n\n"
+        f"🎯 *مستوى الصعوبة المتوقع:* k={result['k']} ({k_status})\n"
+        f"💬 مبرر التوجيه: _{result['k_reason']}_\n\n"
+        f"📊 *المعايير المفعلة أسّياً:* {result['criteria_count']} معيار تقييم\n"
+        f"📋 *بيان مخرجات التحكيم:*\n{criteria_lines}\n\n"
+        f"📐 *الهندسة الرياضية للحساب:* `W_k × S_k × Σ(Score_i^k × Weight_i)`\n"
+        f"  • W_k (الوزن الأسّي) = {result['w_k']}\n"
+        f"  • S_k (عامل الاستجابة السريعة) = {result['s_k']}\n"
+        f"  • المجموع الموزون الخام = {result['total_weighted_sum']:,.2f}\n\n"
+        f"🏅 *النتيجة النهائية الخالصة:* `{result['ai_unit_score']:,.2f} AIU`\n"
+        f"⏱️ زمن الاستجابة الفعلي: {result['t_actual']} ثانية\n"
         f"——————————————————\n"
-        f"⚖️ المحلِّف: {jury_real}"
+        f"⚖️ المحلِّف النشط: `{result['jury_model']}` {jury_status}"
     )
+    
     _send_tg(token, chat_id, reply)
     return {"status": "ok"}
 
 
-# ---------- 8. نقاط النهاية الإضافية ----------
+# ---------- 8. الواجهات البرمجية العامة (API Endpoints) ----------
 @app.post("/api/v1/evaluate")
 async def evaluate_api(request: Request):
     body = await request.json()
     prompt = body.get("prompt", "").strip()
     if not prompt:
-        return {"error": "حقل 'prompt' مطلوب"}
+        return {"error": "حقل 'prompt' مطلوب لتوليد التقييم"}
     return run_ai_unit(prompt)
 
 @app.get("/health")
 async def health():
     return {
         "status": "operational",
-        "version": "8.0",
+        "version": "8.5",
         "tested_model": TESTED_MODEL,
-        "jury_model": JURY_MODEL,
-        "max_criteria": len(MASTER_CRITERIA),
-        "proliferation_formula": "count = 2^(k-1)",
-        "weight_formula": "W_k = e^k",
-        "groq_key": "✅" if os.environ.get("GROQ_API_KEY") else "❌ مفقود",
-        "tg_token": "✅" if os.environ.get("TELEGRAM_BOT_TOKEN") else "❌ مفقود",
+        "standard_jury": JURY_MODEL,
+        "super_jury": SUPER_JURY_MODEL,
+        "groq_key": "✅ متصل" if os.environ.get("GROQ_API_KEY") else "❌ مفقود",
+        "openrouter_key": "✅ متصل" if os.environ.get("OPENROUTER_API_KEY") else "❌ مفقود",
+        "telegram_token": "✅ متصل" if os.environ.get("TELEGRAM_BOT_TOKEN") else "❌ مفقود"
     }
 
-# ==============================================================
-# تشغيل السيرفر محلياً أو عبر البيئة السحابية
-# ==============================================================
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
