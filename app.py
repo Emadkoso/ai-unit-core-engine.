@@ -21,6 +21,7 @@ from fastapi import FastAPI, Request
 import statistics
 import time
 import json
+import math
 import os
 import re
 import requests
@@ -69,8 +70,12 @@ def calculate_difficulty(text: str) -> int:
 
 
 def calculate_w_k(k: int) -> float:
-    """وزن الصعوبة التربيعي: مهمة صعبة تستحق مكافأة غير خطية."""
-    return float(k ** 2)
+    """
+    وزن الصعوبة الأسي: W_k = e^k
+    الفارق بين k=1 وk=5 هو 55x — نموذج يحل مهمة k=5
+    يُكافأ مكافأة لا يمكن تجاهلها مقارنة بـ k=1.
+    """
+    return round(math.e ** k, 4)
 
 
 def calculate_s_k(k: int, t_actual: float) -> float:
@@ -323,4 +328,5 @@ async def health():
         "jury_model":   JURY_MODEL,
         "groq_key":     "✅ موجود" if groq_key_set else "❌ مفقود",
         "tg_token":     "✅ موجود" if tg_token_set else "❌ مفقود",
-    }
+}
+  
