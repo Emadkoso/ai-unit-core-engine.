@@ -1,14 +1,6 @@
 # ==============================================================
-# AI-Unit Core Engine — الإصدار النهائي (V9.3)
-# ملف واحد: app_final.py
-# ==============================================================
-# الإصلاحات النهائية:
-#   1) تصحيح اسم النموذج: gemma2-9b-it → gemma-2-9b-it
-#   2) إزالة أي استخدام لـ os.en (تم استبدال الكل بـ os.environ)
-#   3) فصل عملاء HTTP (Groq بمهلة 120s، Telegram بمهلة 15s)
-#   4) تقطيع رسائل Telegram الطويلة (>4000 حرف)
-#   5) التحقق من صحة النماذج عند بدء التشغيل
-#   6) معالجة قوية للأخطاء تظهر في التيليجرام
+# AI-Unit Core Engine — الإصدار V9.4 (نماذج مُحدَّثة)
+# تم استبدال gemma-2-9b-it بـ mixtral-8x7b-32768
 # ==============================================================
 
 from fastapi import FastAPI, Request, HTTPException, Header
@@ -25,12 +17,13 @@ from typing import Dict, Optional, List, Any, Tuple
 import httpx
 
 # ---------- الإعدادات العامة ----------
-app = FastAPI(title="AI-Unit Core Engine V9.3", version="9.3")
+app = FastAPI(title="AI-Unit Core Engine V9.4", version="9.4")
 
 TESTED_MODEL = "llama-3.3-70b-versatile"
 
+# تشكيلة المحلفين المحدَّثة (جميع النماذج متاحة على Groq)
 JURY_MODELS = [
-    {"name": "academic",   "model": "gemma-2-9b-it",         "weight": 0.4, "desc": "academic precise"},
+    {"name": "academic",   "model": "mixtral-8x7b-32768",    "weight": 0.4, "desc": "academic precise"},
     {"name": "analytical", "model": "llama-3.1-8b-instant",  "weight": 0.3, "desc": "analytical logical"},
     {"name": "creative",   "model": "llama-3.3-70b-versatile","weight": 0.3, "desc": "creative flexible"},
 ]
@@ -399,7 +392,7 @@ async def _send_tg(chat_id: int, text: str):
 
 async def process_and_reply(chat_id: int, user_text: str):
     try:
-        await _send_tg(chat_id, "⏳ جارٍ التقييم بـ Multi-Jury V9.3 ...")
+        await _send_tg(chat_id, "⏳ جارٍ التقييم بـ Multi-Jury V9.4 ...")
         result = await run_ai_unit(user_text)
 
         if not result["success"]:
@@ -412,7 +405,7 @@ async def process_and_reply(chat_id: int, user_text: str):
             fb_note = f"\n⚠️ محلفون احتياطيون: {', '.join(result['jury_fallback_used'])}"
 
         reply = (
-            f"🏆 *AI-Unit V9.3*\n"
+            f"🏆 *AI-Unit V9.4*\n"
             f"——————————————\n"
             f"🎯 k={result['k']} | AIU={result['ai_unit_score']}\n"
             f"⚙️ المحلفين: {len(result['jury_models'])}\n"
@@ -469,7 +462,7 @@ async def get_human_feedback(prompt_hash: str):
 async def health():
     return {
         "status": "operational",
-        "version": "9.3",
+        "version": "9.4",
         "tested_model": TESTED_MODEL,
         "jury_models": [j["model"] for j in JURY_MODELS],
         "human_feedback_entries": sum(len(v) for v in human_feedback_store.values()),
