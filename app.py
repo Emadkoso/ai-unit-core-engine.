@@ -155,16 +155,32 @@ def get_criteria_for_k(k: int, domain: str) -> List[Dict]:
 
 
 # ---------- تخزين دائم عبر SQLite (بدل /tmp JSON) ----------
-DB_PATH = Path(os.environ.get("AI_UNIT_DB_PATH", "/var/data/ai_unit.db"))
-# ملاحظة: لو "/var/data" غير متاح على بيئتك (لا يوجد Persistent Disk)،
-# غيّر AI_UNIT_DB_PATH لمسار آخر، لكن تذكّر أنه سيُمحى عند كل نشر جديد
-# ما لم يكن هذا المسار مرتبطًا فعليًا بقرص دائم أو قاعدة بيانات خارجية.
+#
+# ⚠️ تصحيح عطل حقيقي حدث عند النشر الفعلي (Render):
+# المسار السابق "/var/data/ai_unit.db" غير موجود على الخطة المجانية
+# إلا مع "Persistent Disk" (خدمة مدفوعة). لما التطبيق حاول يفتحه،
+# انهار بالكامل عند الاستيراد (sqlite3.OperationalError) قبل حتى ما
+# يربط أي منفذ — ولهذا ظهرت رسالة "Port scan timeout" في نفس الوقت:
+# التطبيق مات قبل ما يوصل لمرحلة uvicorn.run() أصلاً.
+#
+# الإصلاح على مرحلتين:
+# 1) مسار افتراضي مضمون الكتابة على Render المجاني: داخل مجلد المشروع
+#    نفسه (Path(__file__).parent) بدل مسار نظام غير مضمون الوجود.
+#    هذا لا يزال يُمحى عند كل نشر جديد (نفس القيد المذكور سابقًا)،
+#    لكنه على الأقل لا يُسقط التطبيق بالكامل.
+# 2) تغليف تهيئة قاعدة البيانات بمعالجة أخطاء صريحة: لو فشل فتح
+#    القاعدة لأي سبب (صلاحيات، مسار غير متاح...)، ينزل النظام تلقائيًا
+#    لتخزين مؤقت في الذاكرة (يعمل خلال الجلسة الحالية فقط، يُفقد عند
+#    إعادة التشغيل) بدل أن يرفض التطبيق كله الإقلاع. توفر جزئي أفضل
+#    من عطل كامل.
+DB_PATH = Path(os.environ.get("AI_UNIT_DB_PATH", str(Path(__file__).parent / "ai_unit_data" / "ai_unit.db")))
+
+DB_AVAILABLE = True
+_memory_fallback_store: Dict[str, list] = {}  # يُستخدم فقط إذا فشلت SQLite تمامًا
+
 
 def _ensure_db_dir():
-    try:
-        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    except Exception:
-        pass
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 
 @contextmanager
@@ -179,42 +195,67 @@ def _db_conn():
 
 
 def _init_db():
-    with _db_conn() as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS human_feedback (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                prompt_hash TEXT NOT NULL,
-                score REAL NOT NULL,
-                created_at REAL NOT NULL
-            )
-        """)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_prompt_hash ON human_feedback(prompt_hash)")
+    global DB_AVAILABLE
+    try:
+        with _db_conn() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS human_feedback (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    prompt_hash TEXT NOT NULL,
+                    score REAL NOT NULL,
+                    created_at REAL NOT NULL
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_prompt_hash ON human_feedback(prompt_hash)")
+        DB_AVAILABLE = True
+    except Exception as e:
+        # لا نُسقط التطبيق هنا إطلاقًا — هذا بالضبط ما سبّب الانهيار سابقًا.
+        print(f"⚠️ فشل تهيئة SQLite ({e}) — التبديل التلقائي لتخزين مؤقت بالذاكرة (غير دائم عبر إعادة التشغيل)")
+        DB_AVAILABLE = False
 
 
 _init_db()
 
 
 def save_human_score(prompt_hash: str, score: float):
-    with _db_conn() as conn:
-        conn.execute(
-            "INSERT INTO human_feedback (prompt_hash, score, created_at) VALUES (?, ?, ?)",
-            (prompt_hash, score, time.time()),
-        )
+    if not DB_AVAILABLE:
+        _memory_fallback_store.setdefault(prompt_hash, []).append(score)
+        return
+    try:
+        with _db_conn() as conn:
+            conn.execute(
+                "INSERT INTO human_feedback (prompt_hash, score, created_at) VALUES (?, ?, ?)",
+                (prompt_hash, score, time.time()),
+            )
+    except Exception as e:
+        print(f"⚠️ فشل الكتابة في SQLite ({e}) — تخزين مؤقت بالذاكرة بدلًا منه")
+        _memory_fallback_store.setdefault(prompt_hash, []).append(score)
 
 
 def get_human_scores(prompt_hash: str, limit: int = 5) -> List[float]:
-    with _db_conn() as conn:
-        rows = conn.execute(
-            "SELECT score FROM human_feedback WHERE prompt_hash = ? ORDER BY id DESC LIMIT ?",
-            (prompt_hash, limit),
-        ).fetchall()
-    return [r[0] for r in rows]
+    if not DB_AVAILABLE:
+        return _memory_fallback_store.get(prompt_hash, [])[-limit:]
+    try:
+        with _db_conn() as conn:
+            rows = conn.execute(
+                "SELECT score FROM human_feedback WHERE prompt_hash = ? ORDER BY id DESC LIMIT ?",
+                (prompt_hash, limit),
+            ).fetchall()
+        return [r[0] for r in rows]
+    except Exception as e:
+        print(f"⚠️ فشل القراءة من SQLite ({e}) — استخدام تخزين الذاكرة المؤقت")
+        return _memory_fallback_store.get(prompt_hash, [])[-limit:]
 
 
 def count_human_scores() -> int:
-    with _db_conn() as conn:
-        row = conn.execute("SELECT COUNT(*) FROM human_feedback").fetchone()
-    return row[0] if row else 0
+    if not DB_AVAILABLE:
+        return sum(len(v) for v in _memory_fallback_store.values())
+    try:
+        with _db_conn() as conn:
+            row = conn.execute("SELECT COUNT(*) FROM human_feedback").fetchone()
+        return row[0] if row else 0
+    except Exception:
+        return sum(len(v) for v in _memory_fallback_store.values())
 
 
 _background_tasks: set = set()
@@ -661,7 +702,8 @@ async def health():
         "note": "الاستقلالية الحقيقية محدودة بعدد عائلات النماذج المتاحة فعليًا على Groq — راجع console.groq.com/docs/models دوريًا لإضافة عائلات جديدة إن ظهرت",
         "human_feedback_entries": count_human_scores(),
         "db_path": str(DB_PATH),
-        "db_persistence_warning": "تأكد أن هذا المسار مرتبط بقرص دائم فعليًا في بيئة الإنتاج، وإلا فالبيانات تُمحى عند كل نشر",
+        "db_available": DB_AVAILABLE,
+        "db_persistence_warning": "هذا المسار يُمحى عند كل نشر جديد على Render المجاني ما لم يُربط بـ Persistent Disk أو قاعدة بيانات خارجية — راجع Supabase كبديل مجاني دائم" if DB_AVAILABLE else "⚠️ SQLite فشلت بالكامل والنظام يعمل حاليًا بتخزين مؤقت بالذاكرة فقط (يُفقد فورًا عند إعادة التشغيل)",
         "groq_key": "set" if os.environ.get("GROQ_API_KEY") else "missing",
         "tg_token": "set" if os.environ.get("TELEGRAM_BOT_TOKEN") else "missing",
         "api_key_protection": "enabled" if API_SECRET_KEY else "disabled",
