@@ -1,11 +1,14 @@
 # ==============================================================
-# AI-Unit Core Engine — الإصدار النهائي المُصلَّح (V9.3)
-# الإصلاحات الرئيسية:
-#   1) تصحيح اسم النموذج gemma2-9b-it → gemma-2-9b-it
-#   2) فصل عملاء HTTP (Groq بمهلة 120s، Telegram بمهلة 15s)
-#   3) تقطيع الرسائل الطويلة في Telegram (4000 حرف)
-#   4) التحقق من صحة النماذج عند بدء التشغيل
-#   5) معالجة قوية للأخطاء تظهر في التيليجرام
+# AI-Unit Core Engine — الإصدار النهائي (V9.3)
+# ملف واحد: app_final.py
+# ==============================================================
+# الإصلاحات النهائية:
+#   1) تصحيح اسم النموذج: gemma2-9b-it → gemma-2-9b-it
+#   2) إزالة أي استخدام لـ os.en (تم استبدال الكل بـ os.environ)
+#   3) فصل عملاء HTTP (Groq بمهلة 120s، Telegram بمهلة 15s)
+#   4) تقطيع رسائل Telegram الطويلة (>4000 حرف)
+#   5) التحقق من صحة النماذج عند بدء التشغيل
+#   6) معالجة قوية للأخطاء تظهر في التيليجرام
 # ==============================================================
 
 from fastapi import FastAPI, Request, HTTPException, Header
@@ -26,7 +29,6 @@ app = FastAPI(title="AI-Unit Core Engine V9.3", version="9.3")
 
 TESTED_MODEL = "llama-3.3-70b-versatile"
 
-# تم تصحيح اسم النموذج من gemma2-9b-it إلى gemma-2-9b-it
 JURY_MODELS = [
     {"name": "academic",   "model": "gemma-2-9b-it",         "weight": 0.4, "desc": "academic precise"},
     {"name": "analytical", "model": "llama-3.1-8b-instant",  "weight": 0.3, "desc": "analytical logical"},
@@ -95,17 +97,14 @@ _http_client_tg: Optional[httpx.AsyncClient] = None
 @app.on_event("startup")
 async def _startup():
     global _http_client_groq, _http_client_tg
-    # عميل Groq بمهلة 120 ثانية للأسئلة الطويلة
     _http_client_groq = httpx.AsyncClient(timeout=120.0)
-    # عميل Telegram بمهلة 15 ثانية
     _http_client_tg = httpx.AsyncClient(timeout=15.0)
-    
-    # التحقق من صحة النماذج عند بدء التشغيل
+
     api_key = os.environ.get("GROQ_API_KEY")
     if not api_key:
         print("❌ GROQ_API_KEY غير موجود")
         return
-    
+
     print("🔍 جارٍ التحقق من صحة النماذج...")
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     for jury in JURY_MODELS:
@@ -370,17 +369,16 @@ async def run_ai_unit(prompt: str) -> Dict[str, Any]:
         "prompt_hash": prompt_hash,
     }
 
-# ---------- دوال Telegram المساعدة (مُصلَّحة) ----------
+# ---------- دوال Telegram المساعدة ----------
 async def _send_tg(chat_id: int, text: str):
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     if not token:
         print("ERROR: TELEGRAM_BOT_TOKEN not set")
         return
-    
-    # تقطيع الرسالة إذا تجاوزت 4000 حرف
+
     max_len = 4000
     parts = [text[i:i+max_len] for i in range(0, len(text), max_len)]
-    
+
     for part in parts:
         try:
             await _http_client_tg.post(
@@ -390,7 +388,6 @@ async def _send_tg(chat_id: int, text: str):
             )
         except Exception as e:
             print(f"ERROR: failed to send Telegram message: {e}")
-            # محاولة أخيرة بدون Markdown إذا كان الخطأ بسبب التنسيق
             try:
                 await _http_client_tg.post(
                     f"https://api.telegram.org/bot{token}/sendMessage",
@@ -404,16 +401,16 @@ async def process_and_reply(chat_id: int, user_text: str):
     try:
         await _send_tg(chat_id, "⏳ جارٍ التقييم بـ Multi-Jury V9.3 ...")
         result = await run_ai_unit(user_text)
-        
+
         if not result["success"]:
             await _send_tg(chat_id, f"❌ خطأ: {result['error']}")
             return
-        
+
         scores_lines = "\n".join([f"  • {name}: {score}" for name, score in result["scores"].items()])
         fb_note = ""
         if result["jury_fallback_used"]:
             fb_note = f"\n⚠️ محلفون احتياطيون: {', '.join(result['jury_fallback_used'])}"
-        
+
         reply = (
             f"🏆 *AI-Unit V9.3*\n"
             f"——————————————\n"
@@ -424,9 +421,8 @@ async def process_and_reply(chat_id: int, user_text: str):
             f"🔍 {'✅ مع تحقق بشري' if result['human_correction_applied'] else '🤖 تقييم آلي فقط'}"
         )
         await _send_tg(chat_id, reply)
-        
+
     except Exception as e:
-        # تأكد من إرسال الخطأ مهما حدث
         try:
             await _send_tg(chat_id, f"❌ خطأ داخلي جسيم: {str(e)[:200]}")
         except:
@@ -501,4 +497,19 @@ async def telegram_webhook(
 
     chat_id = data["message"]["chat"]["id"]
     user_text = data["message"]["text"].strip()
-    token = os.en
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+
+    if not token:
+        print("ERROR: TELEGRAM_BOT_TOKEN not set")
+        return {"status": "ok"}
+
+    task = asyncio.create_task(process_and_reply(chat_id, user_text))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+    return {"status": "ok"}
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
