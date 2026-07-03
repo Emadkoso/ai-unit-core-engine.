@@ -1,6 +1,5 @@
 # ==============================================================
-# AI-Unit Core Engine — الإصدار V9.4 (نماذج مُحدَّثة)
-# تم استبدال gemma-2-9b-it بـ mixtral-8x7b-32768
+# AI-Unit Core Engine — الإصدار V9.5 (محلفون بنفس النموذج، درجات حرارة مختلفة)
 # ==============================================================
 
 from fastapi import FastAPI, Request, HTTPException, Header
@@ -17,15 +16,15 @@ from typing import Dict, Optional, List, Any, Tuple
 import httpx
 
 # ---------- الإعدادات العامة ----------
-app = FastAPI(title="AI-Unit Core Engine V9.4", version="9.4")
+app = FastAPI(title="AI-Unit Core Engine V9.5", version="9.5")
 
 TESTED_MODEL = "llama-3.3-70b-versatile"
 
-# تشكيلة المحلفين المحدَّثة (جميع النماذج متاحة على Groq)
+# تشكيلة المحلفين باستخدام نموذج واحد بدرجات حرارة مختلفة
 JURY_MODELS = [
-    {"name": "academic",   "model": "mixtral-8x7b-32768",    "weight": 0.4, "desc": "academic precise"},
-    {"name": "analytical", "model": "llama-3.1-8b-instant",  "weight": 0.3, "desc": "analytical logical"},
-    {"name": "creative",   "model": "llama-3.3-70b-versatile","weight": 0.3, "desc": "creative flexible"},
+    {"name": "academic",   "model": "llama-3.1-8b-instant", "temperature": 0.1, "weight": 0.4, "desc": "دقيق (بارد)"},
+    {"name": "analytical", "model": "llama-3.1-8b-instant", "temperature": 0.5, "weight": 0.3, "desc": "متوازن (معتدل)"},
+    {"name": "creative",   "model": "llama-3.1-8b-instant", "temperature": 0.9, "weight": 0.3, "desc": "إبداعي (ساخن)"},
 ]
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
@@ -110,7 +109,7 @@ async def _startup():
         try:
             resp = await _http_client_groq.post(GROQ_URL, json=test_payload, headers=headers, timeout=5.0)
             if resp.status_code == 200:
-                print(f"✅ نموذج {model} متاح")
+                print(f"✅ نموذج {model} متاح (درجة حرارة {jury['temperature']})")
             else:
                 print(f"❌ نموذج {model} غير متاح (HTTP {resp.status_code}) - تحقق من الاسم")
         except Exception as e:
@@ -227,7 +226,7 @@ async def call_tested_model(prompt: str) -> Tuple[Optional[str], float]:
     )
     return response, time.time() - start
 
-async def evaluate_single_jury(model_response: str, k: int, jury_model: str) -> Dict:
+async def evaluate_single_jury(model_response: str, k: int, jury_model: str, temperature: float) -> Dict:
     criteria = get_criteria_for_k(k)
     criteria_names = [c["name"] for c in criteria]
     criteria_descs = "\n".join([f"  - {c['name']}: {c['desc']}" for c in criteria])
@@ -240,7 +239,7 @@ async def evaluate_single_jury(model_response: str, k: int, jury_model: str) -> 
     raw = await _groq_call_async(
         messages=[{"role": "user", "content": jury_prompt}],
         model=jury_model,
-        temperature=0.1,
+        temperature=temperature,
         max_tokens=500,
         json_mode=True,
         timeout=20,
@@ -264,7 +263,7 @@ async def evaluate_single_jury(model_response: str, k: int, jury_model: str) -> 
 
 async def multi_jury_evaluate(model_response: str, k: int) -> Tuple[Dict, List[str]]:
     tasks = [
-        evaluate_single_jury(model_response, k, jury["model"])
+        evaluate_single_jury(model_response, k, jury["model"], jury["temperature"])
         for jury in JURY_MODELS
     ]
     results = await asyncio.gather(*tasks)
@@ -341,7 +340,7 @@ async def run_ai_unit(prompt: str) -> Dict[str, Any]:
     return {
         "success": True,
         "model_tested": TESTED_MODEL,
-        "jury_models": [j["model"] for j in JURY_MODELS],
+        "jury_models": [f"{j['model']} (temp={j['temperature']})" for j in JURY_MODELS],
         "jury_fallback_used": fallback_juries,
         "k": k,
         "k_reason": k_reason,
@@ -392,7 +391,7 @@ async def _send_tg(chat_id: int, text: str):
 
 async def process_and_reply(chat_id: int, user_text: str):
     try:
-        await _send_tg(chat_id, "⏳ جارٍ التقييم بـ Multi-Jury V9.4 ...")
+        await _send_tg(chat_id, "⏳ جارٍ التقييم بـ Multi-Jury V9.5 ...")
         result = await run_ai_unit(user_text)
 
         if not result["success"]:
@@ -405,7 +404,7 @@ async def process_and_reply(chat_id: int, user_text: str):
             fb_note = f"\n⚠️ محلفون احتياطيون: {', '.join(result['jury_fallback_used'])}"
 
         reply = (
-            f"🏆 *AI-Unit V9.4*\n"
+            f"🏆 *AI-Unit V9.5*\n"
             f"——————————————\n"
             f"🎯 k={result['k']} | AIU={result['ai_unit_score']}\n"
             f"⚙️ المحلفين: {len(result['jury_models'])}\n"
@@ -462,9 +461,9 @@ async def get_human_feedback(prompt_hash: str):
 async def health():
     return {
         "status": "operational",
-        "version": "9.4",
+        "version": "9.5",
         "tested_model": TESTED_MODEL,
-        "jury_models": [j["model"] for j in JURY_MODELS],
+        "jury_models": [f"{j['model']} (temp={j['temperature']})" for j in JURY_MODELS],
         "human_feedback_entries": sum(len(v) for v in human_feedback_store.values()),
         "groq_key": "set" if os.environ.get("GROQ_API_KEY") else "missing",
         "tg_token": "set" if os.environ.get("TELEGRAM_BOT_TOKEN") else "missing",
