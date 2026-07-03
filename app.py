@@ -1,6 +1,7 @@
 # ==============================================================
-# AI-Unit Core Engine — الإصدار النهائي (V9.0)
-# الميزات: تقدير k، تكاثر أسي، Multi‑Jury (3 محلفين)، تحقق بشري
+# AI-Unit Core Engine — الإصدار النهائي المتكامل (V9.1)
+# الميزات: تقدير k، تكاثر أسي، Multi‑Jury (3 محلفين)،
+#          تحقق بشري، ومعالجة خلفية للـ Telegram Webhook
 # ==============================================================
 
 from fastapi import FastAPI, Request, HTTPException
@@ -14,10 +15,9 @@ import requests
 import asyncio
 import hashlib
 from typing import Dict, Optional, List, Any, Tuple
-from pydantic import BaseModel
 
 # ---------- الإعدادات العامة ----------
-app = FastAPI(title="AI-Unit Core Engine V9.0", version="9.0")
+app = FastAPI(title="AI-Unit Core Engine V9.1", version="9.1")
 
 # النموذج المختبر (الذي نقيم أداءه)
 TESTED_MODEL = "llama-3.3-70b-versatile"
@@ -60,7 +60,7 @@ MASTER_CRITERIA = [
     {"name": "generative_power", "desc": "هل يولد معرفة جديدة أم يعيد تدوير المعرفة القديمة؟", "weight": "semi_exp"},
 ]
 
-# ---------- تخزين التقييمات البشرية (في الذاكرة، للإيضاح) ----------
+# ---------- تخزين التقييمات البشرية (في الذاكرة) ----------
 human_feedback_store = {}  # key: prompt_hash, value: list of human scores
 
 # ---------- دوال مساعدة ----------
@@ -112,10 +112,12 @@ def assess_difficulty(prompt: str) -> Tuple[int, str, bool]:
     if raw is None:
         return _difficulty_fallback(prompt), "تقدير احتياطي (فشل استدعاء)", False
     try:
-        data = json.loads(re.search(r'\{[^{}]*\}', raw).group())
-        k = int(data["k"])
-        if 1 <= k <= 5:
-            return k, data.get("reason", "تقدير من الذكاء"), True
+        match = re.search(r'\{[^{}]*\}', raw)
+        if match:
+            data = json.loads(match.group())
+            k = int(data["k"])
+            if 1 <= k <= 5:
+                return k, data.get("reason", "تقدير من الذكاء"), True
         raise ValueError
     except:
         return _difficulty_fallback(prompt), "تقدير احتياطي (JSON غير صالح)", False
@@ -170,10 +172,12 @@ def evaluate_single_jury(model_response: str, k: int, jury_model: str) -> Dict:
     scores = {}
     if raw:
         try:
-            data = json.loads(re.search(r'\{[^{}]*\}', raw).group())
-            for c in criteria:
-                val = data.get(c["name"])
-                scores[c["name"]] = min(max(float(val) if val is not None else 1.0, 0.0), 10.0)
+            match = re.search(r'\{[^{}]*\}', raw)
+            if match:
+                data = json.loads(match.group())
+                for c in criteria:
+                    val = data.get(c["name"])
+                    scores[c["name"]] = min(max(float(val) if val is not None else 1.0, 0.0), 10.0)
         except:
             pass
     # احتياطي
@@ -191,16 +195,28 @@ def multi_jury_evaluate(model_response: str, k: int) -> Dict:
             tasks.append(asyncio.to_thread(evaluate_single_jury, model_response, k, jury["model"]))
         results = await asyncio.gather(*tasks)
         return results
-    results = asyncio.run(evaluate_all())
+    
+    # تشغيل الحلقة غير المتزامنة داخل دالة متزامنة (سياق آمن)
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    
+    if loop and loop.is_running():
+        # إذا كنا داخل حلقة تشغيل (مثل FastAPI)، ننشئ مهمة جديدة وننتظرها
+        results = asyncio.run_coroutine_threadsafe(evaluate_all(), loop).result()
+    else:
+        results = asyncio.run(evaluate_all())
+    
     # 2. دمج النتائج
     all_scores = {}   # اسم المعيار -> قائمة درجات
     for idx, result in enumerate(results):
         for name, score in result["scores"].items():
             all_scores.setdefault(name, []).append(score)
+    
     # 3. حساب الدرجة النهائية لكل معيار = متوسط مرجح
     final_scores = {}
     for name, scores_list in all_scores.items():
-        # نجمع الدرجات مع أوزان المحلفين
         weighted_sum = 0.0
         total_w = 0.0
         for i, score in enumerate(scores_list):
@@ -208,6 +224,7 @@ def multi_jury_evaluate(model_response: str, k: int) -> Dict:
             weighted_sum += score * w
             total_w += w
         final_scores[name] = round(weighted_sum / total_w, 2)
+    
     return final_scores
 
 # ---------- دمج التحقق البشري ----------
@@ -215,12 +232,9 @@ def apply_human_correction(prompt_hash: str, raw_aiu: float) -> float:
     if prompt_hash not in human_feedback_store:
         return raw_aiu
     feedback_list = human_feedback_store[prompt_hash]
-    # نأخذ متوسط آخر 5 تقييمات بشرية
     recent = feedback_list[-5:]
     avg_human = sum(recent) / len(recent)
-    # نحسب الانحراف التراكمي
     deviation = abs(avg_human - raw_aiu) / raw_aiu if raw_aiu > 0 else 0
-    # نطبق تصحيحاً بسيطاً: إذا كان الانحراف كبيراً (>0.3) نعدّل النتيجة
     if deviation > 0.3:
         corrected = (raw_aiu + avg_human) / 2
     else:
@@ -232,13 +246,16 @@ def run_ai_unit(prompt: str) -> Dict[str, Any]:
     # 1. تقدير الصعوبة
     k, k_reason, k_is_real = assess_difficulty(prompt)
     w_k = calculate_w_k(k)
+    
     # 2. استدعاء النموذج المختبر
     model_response, t_actual = call_tested_model(prompt)
     if model_response is None:
         return {"success": False, "error": "فشل استدعاء النموذج المختبَر"}
+    
     # 3. Multi‑Jury
     scores = multi_jury_evaluate(model_response, k)
     avg_score = sum(scores.values()) / len(scores) if scores else 0.0
+    
     # 4. حساب النتيجة الخام
     total_weighted = 0.0
     criterion_details = []
@@ -253,11 +270,14 @@ def run_ai_unit(prompt: str) -> Dict[str, Any]:
             "weight": round(weight, 4),
             "contribution": round(contribution, 4)
         })
+    
     s_k = calculate_s_k(k, t_actual)
     raw_aiu = total_weighted * s_k
+    
     # 5. تطبيق التحقق البشري (إن وجد)
     prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()
     final_aiu = apply_human_correction(prompt_hash, raw_aiu)
+    
     return {
         "success": True,
         "model_tested": TESTED_MODEL,
@@ -272,14 +292,50 @@ def run_ai_unit(prompt: str) -> Dict[str, Any]:
         "w_k": round(w_k, 4),
         "s_k": round(s_k, 4),
         "total_weighted_sum": round(total_weighted, 4),
-        "ai_unit_score": round(final_aiu, 4),   # النتيجة المعدلة بالبشر
-        "raw_aiu": round(raw_aiu, 4),           # النتيجة قبل التعديل البشري
+        "ai_unit_score": round(final_aiu, 4),
+        "raw_aiu": round(raw_aiu, 4),
         "criterion_details": criterion_details,
         "t_actual": round(t_actual, 3),
         "model_response": model_response,
         "human_correction_applied": prompt_hash in human_feedback_store,
         "prompt_hash": prompt_hash,
     }
+
+# ---------- دوال Telegram المساعدة ----------
+def _send_tg(chat_id: int, text: str):
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    if not token:
+        return
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"},
+            timeout=10
+        )
+    except Exception as e:
+        print(f"❌ فشل إرسال Telegram: {e}")
+
+async def process_and_reply(chat_id: int, user_text: str, token: str):
+    """المهمة الخلفية التي تُقيّم وترد."""
+    try:
+        _send_tg(chat_id, "⏳ جارٍ التقييم بـ Multi‑Jury V9.1 ...")
+        result = run_ai_unit(user_text)
+        if not result["success"]:
+            _send_tg(chat_id, f"❌ {result['error']}")
+            return
+        scores_lines = "\n".join([f"  • {name}: {score}" for name, score in result["scores"].items()])
+        reply = (
+            f"🏆 *AI-Unit V9.1*\n"
+            f"——————————————————\n"
+            f"🎯 k={result['k']} | AIU={result['ai_unit_score']}\n"
+            f"⚙️ المحلفين: {len(result['jury_models'])}\n"
+            f"📊 التقييم:\n{scores_lines}\n"
+            f"⏱️ {result['t_actual']} ث\n"
+            f"🔍 {'✅ مع تحقق بشري' if result['human_correction_applied'] else '🤖 تقييم آلي فقط'}"
+        )
+        _send_tg(chat_id, reply)
+    except Exception as e:
+        _send_tg(chat_id, f"❌ خطأ داخلي: {str(e)[:100]}")
 
 # ---------- نقاط النهاية API ----------
 @app.post("/api/v1/evaluate")
@@ -292,10 +348,6 @@ async def evaluate_api(request: Request):
 
 @app.post("/api/v1/human-feedback")
 async def submit_human_feedback(request: Request):
-    """
-    إرسال تقييم بشري لاستخدامه في المعايرة.
-    المتطلبات: prompt_hash, human_score (0-10)
-    """
     body = await request.json()
     prompt_hash = body.get("prompt_hash")
     human_score = body.get("human_score")
@@ -321,51 +373,39 @@ async def get_human_feedback(prompt_hash: str):
 async def health():
     return {
         "status": "operational",
-        "version": "9.0",
+        "version": "9.1",
         "tested_model": TESTED_MODEL,
         "jury_models": JURY_MODELS,
         "human_feedback_entries": sum(len(v) for v in human_feedback_store.values()),
         "groq_key": "✅" if os.environ.get("GROQ_API_KEY") else "❌ مفقود",
+        "tg_token": "✅" if os.environ.get("TELEGRAM_BOT_TOKEN") else "❌ مفقود",
     }
 
-# ---------- Telegram Webhook (اختصار) ----------
-def _send_tg(chat_id: int, text: str):
-    token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    if not token:
-        return
-    try:
-        requests.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"},
-            timeout=10
-        )
-    except:
-        pass
-
+# ---------- Telegram Webhook (مع معالجة خلفية) ----------
 @app.post("/tg-webhook")
 async def telegram_webhook(request: Request):
-    data = await request.json()
+    # 1. استقبل البيانات بسرعة
+    try:
+        data = await request.json()
+    except:
+        return {"status": "ok"}
+    
+    # 2. تأكد من وجود رسالة نصية
     if "message" not in data or "text" not in data["message"]:
         return {"status": "ok"}
+    
     chat_id = data["message"]["chat"]["id"]
     user_text = data["message"]["text"].strip()
-    _send_tg(chat_id, "⏳ جارٍ التقييم بـ Multi‑Jury V9.0 ...")
-    result = run_ai_unit(user_text)
-    if not result["success"]:
-        _send_tg(chat_id, f"❌ {result['error']}")
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    
+    if not token:
+        print("❌ TELEGRAM_BOT_TOKEN مفقود")
         return {"status": "ok"}
-    # بناء رسالة مختصرة للتيليجرام
-    scores_lines = "\n".join([f"  • {name}: {score}" for name, score in result["scores"].items()])
-    reply = (
-        f"🏆 *AI-Unit V9.0*\n"
-        f"——————————————————\n"
-        f"🎯 k={result['k']} | AIU={result['ai_unit_score']}\n"
-        f"⚙️ المحلفين: {len(result['jury_models'])}\n"
-        f"📊 التقييم:\n{scores_lines}\n"
-        f"⏱️ {result['t_actual']} ث\n"
-        f"🔍 {'✅ مع تحقق بشري' if result['human_correction_applied'] else '🤖 تقييم آلي فقط'}"
-    )
-    _send_tg(chat_id, reply)
+    
+    # 3. أطلق المهمة الخلفية ولا تنتظرها (هذا هو السر لتجاوز مهلة 5 ثوان)
+    asyncio.create_task(process_and_reply(chat_id, user_text, token))
+    
+    # 4. رد فوري لـ Telegram بأن الطلب استُقبل (دون انتظار التقييم)
     return {"status": "ok"}
 
 # ---------- تشغيل السيرفر ----------
