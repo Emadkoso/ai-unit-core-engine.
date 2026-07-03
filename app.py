@@ -1,16 +1,11 @@
 # ==============================================================
-# AI-Unit Core Engine — الإصدار المُصلَّح (V9.2)
-# الإصلاحات الرئيسية عن V9.1:
-#   1) إزالة الـ deadlock القاتل في multi_jury_evaluate (كان يجمّد كل طلب)
-#   2) توحيد معادلة الدرجات بحيث تكون قابلة للمقارنة بين مستويات k المختلفة
-#   3) إصلاح التحقق البشري ليعمل فعلياً (كان بلا أي تأثير عملي)
-#   4) استخدام httpx async بدل requests المتزامنة (حل جذر مشكلة الحجب)
-#   5) حماية /tg-webhook بـ secret token و /api/v1/evaluate بمفتاح API اختياري
-#   6) الإبقاء على مرجع لمهام asyncio.create_task لمنع garbage collection
-#   7) وضع علامة is_fallback عند فشل تحليل JSON من أحد المحلفين بدل الصمت
-#   8) حد أدنى معيارين حتى عند k=1
-#   9) تحليل JSON أكثر متانة (raw_decode بدل regex هش)
-#  10) حفظ التقييمات البشرية على القرص (JSON) لتنجو من إعادة التشغيل
+# AI-Unit Core Engine — الإصدار النهائي المُصلَّح (V9.3)
+# الإصلاحات الرئيسية:
+#   1) تصحيح اسم النموذج gemma2-9b-it → gemma-2-9b-it
+#   2) فصل عملاء HTTP (Groq بمهلة 120s، Telegram بمهلة 15s)
+#   3) تقطيع الرسائل الطويلة في Telegram (4000 حرف)
+#   4) التحقق من صحة النماذج عند بدء التشغيل
+#   5) معالجة قوية للأخطاء تظهر في التيليجرام
 # ==============================================================
 
 from fastapi import FastAPI, Request, HTTPException, Header
@@ -26,14 +21,16 @@ from typing import Dict, Optional, List, Any, Tuple
 
 import httpx
 
-app = FastAPI(title="AI-Unit Core Engine V9.2", version="9.2")
+# ---------- الإعدادات العامة ----------
+app = FastAPI(title="AI-Unit Core Engine V9.3", version="9.3")
 
 TESTED_MODEL = "llama-3.3-70b-versatile"
 
+# تم تصحيح اسم النموذج من gemma2-9b-it إلى gemma-2-9b-it
 JURY_MODELS = [
-    {"name": "academic",   "model": "gemma2-9b-it",        "weight": 0.4, "desc": "academic precise"},
-    {"name": "analytical", "model": "llama-3.1-8b-instant", "weight": 0.3, "desc": "analytical logical"},
-    {"name": "creative",   "model": "llama-3.3-70b-versatile", "weight": 0.3, "desc": "creative flexible"},
+    {"name": "academic",   "model": "gemma-2-9b-it",         "weight": 0.4, "desc": "academic precise"},
+    {"name": "analytical", "model": "llama-3.1-8b-instant",  "weight": 0.3, "desc": "analytical logical"},
+    {"name": "creative",   "model": "llama-3.3-70b-versatile","weight": 0.3, "desc": "creative flexible"},
 ]
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
@@ -68,6 +65,7 @@ MASTER_CRITERIA = [
     {"name": "generative_power", "desc": "Does it generate new knowledge or recycle old knowledge?", "weight": "semi_exp"},
 ]
 
+# ---------- تخزين التقييمات البشرية ----------
 HUMAN_FEEDBACK_FILE = Path("/tmp/human_feedback_store.json")
 human_feedback_store: Dict[str, list] = {}
 
@@ -90,20 +88,51 @@ _load_human_feedback()
 
 _background_tasks: set = set()
 
-_http_client: Optional[httpx.AsyncClient] = None
+# ---------- عملاء HTTP منفصلون ----------
+_http_client_groq: Optional[httpx.AsyncClient] = None
+_http_client_tg: Optional[httpx.AsyncClient] = None
 
 @app.on_event("startup")
 async def _startup():
-    global _http_client
-    _http_client = httpx.AsyncClient(timeout=30.0)
+    global _http_client_groq, _http_client_tg
+    # عميل Groq بمهلة 120 ثانية للأسئلة الطويلة
+    _http_client_groq = httpx.AsyncClient(timeout=120.0)
+    # عميل Telegram بمهلة 15 ثانية
+    _http_client_tg = httpx.AsyncClient(timeout=15.0)
+    
+    # التحقق من صحة النماذج عند بدء التشغيل
+    api_key = os.environ.get("GROQ_API_KEY")
+    if not api_key:
+        print("❌ GROQ_API_KEY غير موجود")
+        return
+    
+    print("🔍 جارٍ التحقق من صحة النماذج...")
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    for jury in JURY_MODELS:
+        model = jury["model"]
+        test_payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": "Hi"}],
+            "max_tokens": 1,
+        }
+        try:
+            resp = await _http_client_groq.post(GROQ_URL, json=test_payload, headers=headers, timeout=5.0)
+            if resp.status_code == 200:
+                print(f"✅ نموذج {model} متاح")
+            else:
+                print(f"❌ نموذج {model} غير متاح (HTTP {resp.status_code}) - تحقق من الاسم")
+        except Exception as e:
+            print(f"❌ فشل التحقق من نموذج {model}: {e}")
 
 @app.on_event("shutdown")
 async def _shutdown():
-    if _http_client:
-        await _http_client.aclose()
+    if _http_client_groq:
+        await _http_client_groq.aclose()
+    if _http_client_tg:
+        await _http_client_tg.aclose()
 
+# ---------- دوال مساعدة ----------
 def _extract_json(raw: str) -> Optional[dict]:
-    """Robust JSON extraction using raw_decode instead of fragile regex."""
     if not raw:
         return None
     decoder = json.JSONDecoder()
@@ -134,7 +163,7 @@ async def _groq_call_async(messages, model, temperature=0.7, max_tokens=600,
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
     try:
-        resp = await _http_client.post(GROQ_URL, json=payload, headers=headers, timeout=timeout)
+        resp = await _http_client_groq.post(GROQ_URL, json=payload, headers=headers, timeout=timeout)
         resp.raise_for_status()
         return resp.json()["choices"][0]["message"]["content"]
     except Exception as e:
@@ -341,44 +370,69 @@ async def run_ai_unit(prompt: str) -> Dict[str, Any]:
         "prompt_hash": prompt_hash,
     }
 
+# ---------- دوال Telegram المساعدة (مُصلَّحة) ----------
 async def _send_tg(chat_id: int, text: str):
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     if not token:
+        print("ERROR: TELEGRAM_BOT_TOKEN not set")
         return
-    try:
-        await _http_client.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"},
-            timeout=10,
-        )
-    except Exception as e:
-        print(f"ERROR: failed to send Telegram message: {e}")
+    
+    # تقطيع الرسالة إذا تجاوزت 4000 حرف
+    max_len = 4000
+    parts = [text[i:i+max_len] for i in range(0, len(text), max_len)]
+    
+    for part in parts:
+        try:
+            await _http_client_tg.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={"chat_id": chat_id, "text": part, "parse_mode": "Markdown"},
+                timeout=10,
+            )
+        except Exception as e:
+            print(f"ERROR: failed to send Telegram message: {e}")
+            # محاولة أخيرة بدون Markdown إذا كان الخطأ بسبب التنسيق
+            try:
+                await _http_client_tg.post(
+                    f"https://api.telegram.org/bot{token}/sendMessage",
+                    json={"chat_id": chat_id, "text": part[:500]},
+                    timeout=10,
+                )
+            except Exception as e2:
+                print(f"CRITICAL: even fallback Telegram send failed: {e2}")
 
 async def process_and_reply(chat_id: int, user_text: str):
     try:
-        await _send_tg(chat_id, "Evaluating with Multi-Jury V9.2 ...")
+        await _send_tg(chat_id, "⏳ جارٍ التقييم بـ Multi-Jury V9.3 ...")
         result = await run_ai_unit(user_text)
+        
         if not result["success"]:
-            await _send_tg(chat_id, f"Error: {result['error']}")
+            await _send_tg(chat_id, f"❌ خطأ: {result['error']}")
             return
-        scores_lines = "\n".join([f"  - {name}: {score}" for name, score in result["scores"].items()])
+        
+        scores_lines = "\n".join([f"  • {name}: {score}" for name, score in result["scores"].items()])
         fb_note = ""
         if result["jury_fallback_used"]:
-            fb_note = f"\nWarning: juries using fallback values: {', '.join(result['jury_fallback_used'])}"
+            fb_note = f"\n⚠️ محلفون احتياطيون: {', '.join(result['jury_fallback_used'])}"
+        
         reply = (
-            f"AI-Unit V9.2\n"
-            f"------------------\n"
-            f"k={result['k']} | AIU={result['ai_unit_score']}\n"
-            f"Juries: {len(result['jury_models'])}\n"
-            f"Scores:\n{scores_lines}\n"
-            f"Time: {result['t_actual']}s"
-            f"{fb_note}\n"
-            f"{'With human verification' if result['human_correction_applied'] else 'Automatic evaluation only'}"
+            f"🏆 *AI-Unit V9.3*\n"
+            f"——————————————\n"
+            f"🎯 k={result['k']} | AIU={result['ai_unit_score']}\n"
+            f"⚙️ المحلفين: {len(result['jury_models'])}\n"
+            f"📊 التقييم:\n{scores_lines}\n"
+            f"⏱️ {result['t_actual']} ث{fb_note}\n"
+            f"🔍 {'✅ مع تحقق بشري' if result['human_correction_applied'] else '🤖 تقييم آلي فقط'}"
         )
         await _send_tg(chat_id, reply)
+        
     except Exception as e:
-        await _send_tg(chat_id, f"Internal error: {str(e)[:100]}")
+        # تأكد من إرسال الخطأ مهما حدث
+        try:
+            await _send_tg(chat_id, f"❌ خطأ داخلي جسيم: {str(e)[:200]}")
+        except:
+            print(f"FATAL: Cannot send error message to chat {chat_id}")
 
+# ---------- نقاط النهاية API ----------
 def _check_api_key(x_api_key: Optional[str]):
     if API_SECRET_KEY and x_api_key != API_SECRET_KEY:
         raise HTTPException(status_code=401, detail="Invalid API key")
@@ -419,9 +473,9 @@ async def get_human_feedback(prompt_hash: str):
 async def health():
     return {
         "status": "operational",
-        "version": "9.2",
+        "version": "9.3",
         "tested_model": TESTED_MODEL,
-        "jury_models": JURY_MODELS,
+        "jury_models": [j["model"] for j in JURY_MODELS],
         "human_feedback_entries": sum(len(v) for v in human_feedback_store.values()),
         "groq_key": "set" if os.environ.get("GROQ_API_KEY") else "missing",
         "tg_token": "set" if os.environ.get("TELEGRAM_BOT_TOKEN") else "missing",
@@ -447,19 +501,4 @@ async def telegram_webhook(
 
     chat_id = data["message"]["chat"]["id"]
     user_text = data["message"]["text"].strip()
-    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-
-    if not token:
-        print("ERROR: TELEGRAM_BOT_TOKEN not set")
-        return {"status": "ok"}
-
-    task = asyncio.create_task(process_and_reply(chat_id, user_text))
-    _background_tasks.add(task)
-    task.add_done_callback(_background_tasks.discard)
-
-    return {"status": "ok"}
-
-if __name__ == "__main__":
-    import uvicorn
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    token = os.en
