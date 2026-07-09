@@ -1,14 +1,16 @@
 # ==============================================================
-# AI-Unit V11 — الإصدار التجاري (مجاني بالكامل)
+# AI-Unit V11 — الإصدار التجاري (مجاني بالكامل) + واجهة بصرية
 # التغييرات الجوهرية:
-#   1) تخزين دائم عبر Supabase (مجاني) بدل SQLite المحلي الذي يُمحى.
-#   2) نظام كاش ذكي: تكرار السؤال = رد فوري بدون استدعاء Groq (توفير 90%).
-#   3) محلفان سريعان فقط (حذف Qwen البطيء) → زمن استجابة ~8 ثوانٍ.
-#   4) إضافة أمر /compare لمقارنة نموذجين (المنتج التسويقي الأول).
-#   5) إزالة كل المعايير الدينية/القرآنية، التركيز على القياس العام.
+#   1) تخزين دائم عبر Supabase (مجاني) بدل SQLite.
+#   2) نظام كاش ذكي لتوفير 90% من حصص Groq.
+#   3) محلفان سريعان فقط → زمن استجابة ~8 ثوانٍ.
+#   4) أمر /compare لمقارنة نموذجين (المنتج التسويقي).
+#   5) واجهة بصرية (Dashboard) تعمل على الرابط الأساسي / 
 # ==============================================================
 
 from fastapi import FastAPI, Request, HTTPException, Header
+from fastapi.staticfiles import StaticFiles  # <-- إضافة جديدة للواجهة
+from fastapi.responses import FileResponse
 import statistics
 import time
 import json
@@ -18,14 +20,13 @@ import asyncio
 import hashlib
 import random
 from typing import Dict, Optional, List, Any, Tuple
-from contextlib import contextmanager
 
 import httpx
-from supabase import create_client, Client  # <--- تثبيت: pip install supabase
+from supabase import create_client, Client
 
 # ---------- الإعدادات العامة ----------
 app = FastAPI(title="AI-Unit Commercial V11", version="11.0")
-TESTED_MODEL = "llama-3.3-70b-versatile"  # النموذج الرئيسي الذي نقيسه
+TESTED_MODEL = "llama-3.3-70b-versatile"
 
 # ---------- متغيرات البيئة الإلزامية ----------
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
@@ -65,7 +66,6 @@ def save_human_score(prompt_hash: str, score: float):
             return
         except Exception as e:
             print(f"⚠️ فشل كتابة Supabase (سجل): {e}")
-    # احتياطي الذاكرة
     _memory_store.setdefault(prompt_hash, []).append(score)
 
 def get_human_scores(prompt_hash: str, limit: int = 5) -> List[float]:
@@ -124,13 +124,13 @@ GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 _http_client_groq: Optional[httpx.AsyncClient] = None
 _http_client_tg: Optional[httpx.AsyncClient] = None
 
-# محلفان مستقلان وسريعان فقط (مقارنة بـ V10 الذي كان 3)
+# محلفان مستقلان وسريعان فقط
 JURY_MODELS = [
     {"name": "llama_fast", "model": "llama-3.1-8b-instant", "temperature": 0.3, "weight": 0.5, "family": "Meta/Llama"},
     {"name": "gptoss_fast", "model": "openai/gpt-oss-20b", "temperature": 0.3, "weight": 0.5, "family": "OpenAI/GPT-OSS"},
 ]
 
-# معايير التقييم العامة (بدون أي معايير دينية)
+# معايير التقييم العامة
 MASTER_CRITERIA = [
     {"name": "accuracy", "desc": "Is the answer fully correct and free of factual errors?", "weight": "exp"},
     {"name": "clarity", "desc": "Is the answer clear and direct without ambiguity?", "weight": "linear"},
@@ -259,7 +259,7 @@ async def multi_jury_evaluate(model_response: str, k: int) -> Tuple[Dict, Dict]:
 async def run_ai_unit(prompt: str, model_override: Optional[str] = None) -> Dict[str, Any]:
     prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()
     
-    # 1. فحص الكاش أولاً (توفير المال والوقت)
+    # 1. فحص الكاش أولاً
     cached = get_cached_result(prompt_hash)
     if cached:
         print(f"✅ كاش: تم الرد على السؤال من قاعدة البيانات (توفير حصة Groq).")
@@ -267,7 +267,6 @@ async def run_ai_unit(prompt: str, model_override: Optional[str] = None) -> Dict
         return cached
 
     # 2. التقييم الجديد
-    domain = "general"  # تبسيط، لن نستخدم المجالات المعقدة.
     k, k_reason, k_is_real = await assess_difficulty(prompt)
     
     model_response, t_actual = await call_tested_model(prompt, model_override)
@@ -277,9 +276,7 @@ async def run_ai_unit(prompt: str, model_override: Optional[str] = None) -> Dict
     scores, reasons = await multi_jury_evaluate(model_response, k)
     avg_score = sum(scores.values()) / len(scores) if scores else 0.0
     
-    # 3. حساب النتيجة النهائية (نفس المنطق القديم لكن مبسط)
     w_k = round(math.e ** k, 4)
-    s_k = 1.0  # تبسيط لتسريع الحساب، يمكن إهمال معامل الزمن هنا مؤقتاً
     ai_unit_score = round(avg_score * w_k, 4)
     
     result = {
@@ -301,11 +298,10 @@ async def run_ai_unit(prompt: str, model_override: Optional[str] = None) -> Dict
         ]
     }
     
-    # 4. حفظ النتيجة في الكاش والتغذية الراجعة (للبناء المستقبلي)
     save_cached_result(prompt_hash, result)
     return result
 
-# ================= دوال التيليجرام والأوامر الجديدة =================
+# ================= دوال التيليجرام والأوامر =================
 _background_tasks: set = set()
 
 async def _send_tg(chat_id: int, text: str):
@@ -322,7 +318,7 @@ async def _send_tg(chat_id: int, text: str):
 
 async def process_and_reply(chat_id: int, user_text: str):
     try:
-        # ---- أمر المقارنة الجديد (المنتج التسويقي) ----
+        # ---- أمر المقارنة ----
         if user_text.startswith("/compare"):
             parts = user_text.split(maxsplit=3)
             if len(parts) < 4:
@@ -352,7 +348,7 @@ async def process_and_reply(chat_id: int, user_text: str):
             await _send_tg(chat_id, reply)
             return
 
-        # ---- الأمر العادي (تقييم سؤال واحد) ----
+        # ---- الأمر العادي ----
         await _send_tg(chat_id, "⏳ جارٍ التقييم السريع (محلفان مستقلان)...")
         result = await run_ai_unit(user_text)
         if not result["success"]:
@@ -383,7 +379,7 @@ async def process_and_reply(chat_id: int, user_text: str):
 @app.on_event("startup")
 async def startup():
     global _http_client_groq, _http_client_tg
-    _http_client_groq = httpx.AsyncClient(timeout=30.0)  # تقليل المهلة
+    _http_client_groq = httpx.AsyncClient(timeout=30.0)
     _http_client_tg = httpx.AsyncClient(timeout=15.0)
     if not GROQ_API_KEY: print("❌ GROQ_API_KEY مفقود")
     print("🚀 AI-Unit V11 جاهز (مجاني، سريع، مع كاش Supabase)")
@@ -416,6 +412,19 @@ async def health():
         "note": "جاهز للاستخدام التجاري مع ميزانية صفرية."
     }
 
+# ================= الواجهة البصرية (Dashboard) =================
+# التأكد من وجود مجلد static
+os.makedirs("static", exist_ok=True)
+
+# نقطة النهاية الرئيسية (الصفحة الرئيسية)
+@app.get("/")
+async def serve_dashboard():
+    return FileResponse("static/index.html")
+
+# ربط مجلد الملفات الثابتة
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# ================= تشغيل الخادم =================
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
