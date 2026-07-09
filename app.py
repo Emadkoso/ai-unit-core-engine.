@@ -126,8 +126,10 @@ _http_client_tg: Optional[httpx.AsyncClient] = None
 
 # محلفان مستقلان وسريعان فقط
 JURY_MODELS = [
-    {"name": "llama_fast", "model": "llama-3.1-8b-instant", "temperature": 0.3, "weight": 0.5, "family": "Meta/Llama"},
-    {"name": "gptoss_fast", "model": "openai/gpt-oss-20b", "temperature": 0.3, "weight": 0.5, "family": "OpenAI/GPT-OSS"},
+    {"name": "llama_fast", "model": "llama-3.1-8b-instant", "temperature": 0.3, "weight": 0.25, "family": "Meta/Llama"},
+    {"name": "gptoss_fast", "model": "openai/gpt-oss-20b", "temperature": 0.3, "weight": 0.25, "family": "OpenAI/GPT-OSS"},
+    {"name": "mixtral", "model": "mixtral-8x7b-32768", "temperature": 0.3, "weight": 0.25, "family": "Mistral/Mixtral"},
+    {"name": "gemma", "model": "gemma2-9b-it", "temperature": 0.3, "weight": 0.25, "family": "Google/Gemma"},
 ]
 
 # معايير التقييم العامة
