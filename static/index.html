@@ -65,17 +65,19 @@
         <!-- أرشيف آخر التقييمات من Supabase -->
         <div class="glass-card rounded-2xl p-6">
             <h2 class="text-xl font-bold mb-4">📈 آخر التقييمات المخزنة</h2>
-            <div id="historyList" class="space-y-3 max-h-96 overflow-y-auto scrollbar-thin scrollbar-thumb-slate-700">
+            <div id="historyList" class="space-y-3 max-h-96 overflow-y-auto">
                 <p class="text-gray-500 text-center py-4">جاري تحميل التاريخ...</p>
             </div>
         </div>
     </div>
 
     <script>
-        // -------- قراءة البيانات من Supabase مباشرة (باستخدام المفتاح العام) --------
-        const SUPABASE_URL = 'https://evtgmhhfpggdxqvuhiop.supabase.co';
-        const SUPABASE_KEY = 'sb_publishable_v2SDd7kPSYIplkINGC2cxg_dWQMYfXl...'; // ⚠️ ضع مفتاحك الكامل هنا
+        // -------- بيانات Supabase (عدّل المفتاح هنا) --------
+        const SUPABASE_URL = 'https://evtgmhhfpggdqxvuhiop.supabase.co';
+        // ⚠️ هام: ضع المفتاح العام الكامل (anon key) الذي يبدأ بـ sb_publishable_ 
+        const SUPABASE_KEY = 'sb_publishable_v2SDd7kPSYIplkINGC2cxg_dWQMYfXl'; 
 
+        // -------- جلب التاريخ من قاعدة البيانات --------
         async function fetchHistory() {
             try {
                 const res = await fetch(`${SUPABASE_URL}/rest/v1/response_cache?select=prompt_hash,result_json,created_at&order=created_at.desc&limit=10`, {
@@ -84,7 +86,7 @@
                 const data = await res.json();
                 const container = document.getElementById('historyList');
                 if (!data || data.length === 0) {
-                    container.innerHTML = '<p class="text-gray-500 text-center">لا توجد تقييمات سابقة.</p>';
+                    container.innerHTML = '<p class="text-gray-500 text-center py-4">لا توجد تقييمات سابقة.</p>';
                     return;
                 }
                 container.innerHTML = data.map(item => {
@@ -102,7 +104,8 @@
                     </div>`;
                 }).join('');
             } catch (e) {
-                document.getElementById('historyList').innerHTML = '<p class="text-red-400">فشل تحميل التاريخ، تأكد من المفتاح.</p>';
+                document.getElementById('historyList').innerHTML = '<p class="text-red-400 text-center py-4">فشل تحميل التاريخ، تأكد من المفتاح.</p>';
+                console.error(e);
             }
         }
 
@@ -127,7 +130,7 @@
                 loading.classList.add('hidden');
 
                 if (!data.success) {
-                    alert('خطأ: ' + data.error);
+                    alert('خطأ: ' + (data.error || 'غير معروف'));
                     return;
                 }
 
@@ -151,10 +154,8 @@
                     });
                 }
                 card.classList.remove('hidden');
-
-                // تحديث الكاش
                 document.getElementById('cacheStat').innerHTML = 'الكاش: ✅ محدث';
-                fetchHistory(); // إعادة تحميل التاريخ
+                fetchHistory(); // تحديث التاريخ
 
             } catch (e) {
                 loading.classList.add('hidden');
